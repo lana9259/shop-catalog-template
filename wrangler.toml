@@ -1,0 +1,7 @@
+name = "shop-catalog-template"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+kv_namespaces = [
+  { binding = "CATALOG_KV", id = "" }
+]
