@@ -1,18 +1,21 @@
 /**
  * worker.js — این فایل روی حساب شخصی خودِ فروشنده اجرا می‌شود، نه حساب من.
  *
- * ‼️ تغییر این نسخه (ساده‌سازی مرحله‌ی اتصال):
- * قبلاً مسیر /setup یک JSON خام برمی‌گرداند که فروشنده باید دو مقدار را
- * از آن دستی کپی و در سایت ما paste می‌کرد. حالا مسیر اصلی (/) یک صفحه‌ی
- * HTML ساده با فقط یک کادر متن («کد را اینجا paste کنید») است. فروشنده
- * فقط همان یک کد کوتاهی که از سایت ما گرفته را اینجا paste و دکمه‌ی
- * «اتصال» را می‌زند؛ خودِ این صفحه (با جاوااسکریپت داخلش) توکن خودش را
- * از مسیر داخلی /internal-token می‌خواند و مستقیم به سرور مرکزی می‌فرستد
- * — فروشنده هرگز توکن را نمی‌بیند و مجبور به کپی‌کردنش نیست.
+ * ‼️ تغییر این نسخه (کاهش مرحله‌ی اتصال از «تایپ/paste دستی» به «یک کلیک»):
+ * صفحه‌ی اصلی (/) حالا یک دکمه‌ی بزرگ «اتصال خودکار» دارد که با یک کلیک،
+ * کد را خودش با navigator.clipboard.readText() از کلیپ‌بورد کاربر می‌خواند
+ * (چون سایت ما همان لحظه‌ی ساختن کد، آن را در کلیپ‌بورد کاربر کپی کرده)
+ * و بلافاصله بدون نیاز به تایپ یا paste دستی، فرآیند اتصال را کامل می‌کند.
+ *
+ * اگر خواندن خودکار کلیپ‌بورد به هر دلیلی (نبود مجوز مرورگر، کلیپ‌بورد
+ * خالی/نامعتبر) ناموفق بود، همان کادر متنی قدیمی + دکمه‌ی «اتصال دستی»
+ * به‌عنوان پشتیبان کامل، بدون هیچ تغییری در رفتار، در دسترس می‌ماند —
+ * یعنی هیچ مسیر موفقیت قبلی خراب نمی‌شود، فقط یک مسیر سریع‌تر اضافه شده.
  *
  * مسیر /setup قدیمی هم برای سازگاری/عیب‌یابی دستی باقی مانده و حذف نشده.
  * مسیرهای /update و /catalog دقیقاً بدون هیچ تغییری از نسخه‌ی قبلی حفظ
- * شده‌اند.
+ * شده‌اند. مسیر /internal-token و منطق سرور (/claim) هم دست‌نخورده است —
+ * فقط HTML/JS صفحه‌ی landing تغییر کرده.
  */
 
 const CATALOG_KEY = "catalog";
@@ -52,11 +55,13 @@ async function getOrCreateToken(env) {
   return token;
 }
 
-// ‼️ صفحه‌ی جدید و ساده: یک کادر متن، یک دکمه، بدون هیچ توضیح فنی اضافه.
+// ‼️ صفحه‌ی جدید: یک دکمه‌ی اصلی «اتصال خودکار» (می‌خواند از کلیپ‌بورد،
+// بدون نیاز به تایپ) + یک کادر متنی کوچک‌تر به‌عنوان پشتیبان دستی.
 // جاوااسکریپت همین صفحه (نه فروشنده) کار زیر را انجام می‌دهد:
 //   ۱) از مسیر داخلی /internal-token (هم‌مبدأ، بدون CORS) توکن را می‌خواند
 //   ۲) آدرس خودش را از window.location.origin می‌گیرد
-//   ۳) هر دو را، همراه با کدی که فروشنده paste کرده، به سرور مرکزی می‌فرستد
+//   ۳) کد را یا از کلیپ‌بورد (خودکار) یا از کادر متنی (دستی) می‌گیرد
+//   ۴) هر سه را به سرور مرکزی می‌فرستد
 function landingPageHtml() {
   return (
     "<!DOCTYPE html>" +
@@ -70,10 +75,16 @@ function landingPageHtml() {
     "box-shadow:0 10px 30px rgba(0,0,0,.08);text-align:center;}" +
     "h1{font-size:19px;color:#0A3838;margin:0 0 10px;}" +
     "p{color:#55524A;font-size:14px;line-height:1.7;margin:0 0 20px;}" +
+    ".primary-btn{width:100%;padding:16px;font-size:16px;font-weight:800;color:#fff;" +
+    "background:#0E4B4B;border:none;border-radius:12px;cursor:pointer;margin-bottom:10px;}" +
+    ".primary-btn:disabled{opacity:.55;}" +
+    ".fallback-toggle{background:none;border:none;color:#8a7f68;font-size:12.5px;" +
+    "text-decoration:underline;cursor:pointer;margin-top:2px;}" +
+    "#manualBox{display:none;margin-top:18px;padding-top:18px;border-top:1px solid #E1D9C4;text-align:right;}" +
     "input{width:100%;box-sizing:border-box;padding:14px;font-size:20px;letter-spacing:4px;" +
     "text-align:center;border:2px solid #E1D9C4;border-radius:10px;margin-bottom:14px;" +
     "direction:ltr;text-transform:uppercase;}" +
-    "button{width:100%;padding:14px;font-size:15px;font-weight:700;color:#0A3838;" +
+    "button.secondary{width:100%;padding:14px;font-size:15px;font-weight:700;color:#0A3838;" +
     "background:#D9A441;border:none;border-radius:10px;cursor:pointer;}" +
     "button:disabled{opacity:.5;}" +
     "#msg{margin-top:16px;font-size:13.5px;min-height:20px;}" +
@@ -81,19 +92,23 @@ function landingPageHtml() {
     "</style></head><body>" +
     '<div class="card">' +
     "<h1>🔗 اتصال انبار فروشگاه</h1>" +
-    "<p>کدی که از سایت دستیار خرید کپی کرده‌اید را اینجا وارد کنید.</p>" +
-    '<input id="code" maxlength="6" placeholder="مثلاً A3K9F2" autofocus>' +
-    '<button id="btn" onclick="doClaim()">اتصال</button>' +
+    "<p>کدی که از سایت دستیار خرید گرفته‌اید همین الان در کلیپ‌بورد گوشی شماست. فقط دکمه‌ی زیر را بزنید.</p>" +
+    '<button id="autoBtn" class="primary-btn" onclick="doAutoClaim()">⚡ اتصال خودکار</button>' +
+    '<button type="button" class="fallback-toggle" onclick="toggleManual()">کار نکرد؟ کد را دستی وارد کنم</button>' +
+    '<div id="manualBox">' +
+    '<input id="code" maxlength="6" placeholder="مثلاً A3K9F2">' +
+    '<button class="secondary" onclick="doManualClaim()">اتصال دستی</button>' +
+    "</div>" +
     '<div id="msg"></div>' +
     "</div>" +
     "<script>" +
-    "async function doClaim(){" +
-    'var codeEl=document.getElementById("code");' +
-    'var btn=document.getElementById("btn");' +
+    "function toggleManual(){" +
+    'var box=document.getElementById("manualBox");' +
+    'box.style.display = box.style.display==="block" ? "none" : "block";' +
+    "}" +
+    "async function claimWithCode(code){" +
     'var msgEl=document.getElementById("msg");' +
-    "var code=codeEl.value.trim().toUpperCase();" +
-    'if(!code){msgEl.className="err";msgEl.textContent="لطفاً کد را وارد کنید.";return;}' +
-    "btn.disabled=true;" +
+    'if(!code){msgEl.className="err";msgEl.textContent="کدی پیدا نشد. از دکمه‌ی دستی استفاده کنید.";return false;}' +
     'msgEl.className="";msgEl.textContent="در حال اتصال...";' +
     "try{" +
     'var tokRes=await fetch("/internal-token");' +
@@ -106,14 +121,43 @@ function landingPageHtml() {
     "var data=await res.json();" +
     "if(!res.ok){" +
     'msgEl.className="err";msgEl.textContent=data.error||"اتصال ناموفق بود.";' +
-    "btn.disabled=false;return;" +
+    "return false;" +
     "}" +
-    'msgEl.className="ok";msgEl.textContent="✅ متصل شد! '+
-    'می‌توانید این صفحه را ببندید و به سایت دستیار خرید برگردید.";' +
+    'msgEl.className="ok";msgEl.textContent="✅ متصل شد! می‌توانید این صفحه را ببندید و به سایت دستیار خرید برگردید.";' +
+    "return true;" +
     "}catch(e){" +
     'msgEl.className="err";msgEl.textContent="اتصال به سرور برقرار نشد. اینترنت را بررسی کنید.";' +
-    "btn.disabled=false;" +
+    "return false;" +
     "}" +
+    "}" +
+    "async function doAutoClaim(){" +
+    'var autoBtn=document.getElementById("autoBtn");' +
+    'var msgEl=document.getElementById("msg");' +
+    "autoBtn.disabled=true;" +
+    "var code=null;" +
+    "try{" +
+    "if(navigator.clipboard && navigator.clipboard.readText){" +
+    "var raw=await navigator.clipboard.readText();" +
+    'code=(raw||"").trim().toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6);' +
+    "}" +
+    "}catch(clipErr){" +
+    "code=null;" +
+    "}" +
+    "if(!code || code.length<6){" +
+    'msgEl.className="err";' +
+    'msgEl.textContent="خواندن خودکار کلیپ‌بورد ممکن نشد. روی «کد را دستی وارد کنم» بزنید و کد را paste کنید.";' +
+    "autoBtn.disabled=false;" +
+    "toggleManual();" +
+    "return;" +
+    "}" +
+    "var ok=await claimWithCode(code);" +
+    "if(!ok){autoBtn.disabled=false;toggleManual();}" +
+    "}" +
+    "async function doManualClaim(){" +
+    'var codeEl=document.getElementById("code");' +
+    "var code=codeEl.value.trim().toUpperCase();" +
+    "var ok=await claimWithCode(code);" +
+    "if(!ok){}" +
     "}" +
     "</script></body></html>"
   );
@@ -133,13 +177,13 @@ export default {
       });
     }
 
-    // ‼️ جدید — صفحه‌ی اصلی و ساده‌ی اتصال (این چیزی است که فروشنده باز می‌کند)
+    // صفحه‌ی اصلی و ساده‌ی اتصال (این چیزی است که فروشنده باز می‌کند)
     if (url.pathname === "/" && request.method === "GET") {
       return html(landingPageHtml());
     }
 
-    // ‼️ جدید — فقط خودِ همین صفحه (هم‌مبدأ) این مسیر را می‌خواند؛ فروشنده
-    // هرگز مستقیم به این آدرس نمی‌رود و توکن را نمی‌بیند.
+    // فقط خودِ همین صفحه (هم‌مبدأ) این مسیر را می‌خواند؛ فروشنده هرگز
+    // مستقیم به این آدرس نمی‌رود و توکن را نمی‌بیند.
     if (url.pathname === "/internal-token" && request.method === "GET") {
       var tokenForPage = await getOrCreateToken(env);
       return json({ token: tokenForPage });
