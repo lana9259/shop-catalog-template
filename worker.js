@@ -1,48 +1,27 @@
 /**
  * worker.js — این فایل روی حساب شخصی خودِ فروشنده اجرا می‌شود، نه حساب من.
  *
- * ‼️ تغییر این نسخه (بروزرسانی خودکار ساعتی، بدون هیچ دخالت فروشنده و
- * بدون هیچ هزینه یا ترافیک روی سرور مرکزی من):
+ * ‼️ بخش ۱ - جدید (زیرساخت ذخیره‌سازی عکس):
+ * این نسخه یک بخش کاملاً جدید و مستقل اضافه می‌کند که به فروشنده اجازه
+ * می‌دهد یک «توکن گیت‌هاب محدود» و «آدرس مخزن خودش» را وارد کند. این دو
+ * مقدار، بعد از یک تست اعتبارسنجی واقعی روی گیت‌هاب، در KV همین Worker
+ * (یعنی حساب خودِ فروشنده، نه سرور مرکزی من) ذخیره می‌شوند.
  *
- * یک Cron Trigger — تعریف‌شده در wrangler.toml همین قالب، هر ۱ ساعت
- * یک‌بار — تابع scheduled() پایین همین فایل را روی حساب رایگان خودِ
- * فروشنده اجرا می‌کند. این تابع:
- *   ۱) از KV خودِ همین Worker می‌خواند که آخرین «origin» (آدرس سایت
- *      فروشگاه) کدام بود (همان چیزی که سرور مرکزی هنگام اولین اتصال
- *      در /update فرستاده و ذخیره کرده).
- *   ۲) مستقیماً از همان سایت (نه از طریق سرور مرکزی من) دوباره
- *      محصولات را می‌خواند — یا با تلاش برای یک API مستقیم محصولات،
- *      یا با خزیدنِ محترمانه (احترام به robots.txt) روی sitemap سایت.
- *   ۳) نتیجه را مستقیماً در KV خودِ همین Worker می‌نویسد.
+ * ‼️ مهم: در همین بخش (۱)، هیچ عکسی خزیده، دانلود یا آپلود نمی‌شود.
+ * فقط زیرساخت (گرفتن و ذخیره‌ی امن اعتبارنامه) ساخته شده. خزش و آپلود
+ * واقعی عکس‌ها در «بخش ۲» پیاده‌سازی خواهد شد و از همین پیکربندی که
+ * اینجا ذخیره می‌شود استفاده می‌کند.
  *
- * نتیجه: نه یک ساب‌ریکوئست، نه یک ردیف از سقف ۱۰۰,۰۰۰ درخواست روزانه‌ی
- * حساب Cloudflare من مصرف می‌شود — چون اصلاً پای سرور مرکزی من در این
- * چرخه نیست. با ۱۰۰ فروشگاه یا ۱۰ میلیون فروشگاه فرقی برای حساب من
- * ندارد؛ هرکدام فقط سقف رایگان مستقل خودشان را مصرف می‌کنند.
- *
- * صداقتِ فنی (مهم): پلن رایگان Cloudflare برای هر اجرای Worker (از جمله
- * Cron) سقف ۱۰ میلی‌ثانیه CPU و ۵۰ ساب‌ریکوئست دارد. زمان انتظار برای
- * fetch جزو CPU حساب نمی‌شود، ولی پردازش HTML (regex/JSON.parse) می‌شود.
- * به همین دلیل این تابع عمداً: (الف) تعداد صفحات را کم نگه می‌دارد،
- * (ب) robots.txt را فقط یک‌بار در کل چرخه می‌خواند نه به‌ازای هر صفحه،
- * (ج) حجم HTML خوانده‌شده را محدود می‌کند، و (د) کل تابع در try/catch
- * پوشیده شده — اگر یک چرخه به هر دلیلی (شامل برخورد به سقف CPU) شکست
- * بخورد، هیچ‌چیز کاربر یا کاتالوگ موجود را خراب نمی‌کند؛ کاتالوگ قبلی
- * دست‌نخورده می‌ماند و ساعت بعد دوباره تلاش می‌شود.
- *
- * هیچ منطق دیگری (fetch handler، مسیرهای /، /internal-token، /setup،
- * /update، /catalog، صفحه‌ی landing و دکمه‌ی «اتصال خودکار») تغییر
- * نکرده است.
+ * هیچ منطق دیگری (fetch handler قبلی، مسیرهای /، /internal-token، /setup،
+ * /update، /catalog، صفحه‌ی landing قبلی، دکمه‌ی «اتصال خودکار»، Cron
+ * Trigger و چرخه‌ی self-refresh) تغییر نکرده است.
  */
 
 const CATALOG_KEY = "catalog";
 const TOKEN_KEY = "update-token";
+const IMAGE_CONFIG_KEY = "image-config"; // ‼️ بخش ۱ - جدید
 
 // ‼️ آدرس سرور مرکزی — همانی که در سایت ما (worker.js اصلی) هست.
-// اگر روزی آدرس سرور مرکزی عوض شد، فقط همین یک خط باید در این قالب
-// به‌روزرسانی شود (و همه‌ی فروشندگانی که از این پس دیپلوی می‌کنند،
-// نسخه‌ی جدید را می‌گیرند؛ فروشندگان قبلی همچنان با آدرس قدیمی کار
-// می‌کنند مگر دوباره دیپلوی کنند).
 const CENTRAL_SERVER_URL = "https://shop-assistant.laana9258.workers.dev";
 
 // ‼️ جدید — تنظیمات مخصوص چرخه‌ی خودکار ساعتی (self-refresh). این
@@ -55,6 +34,11 @@ const SELF_REFRESH_MAX_RESPONSE_CHARS = 900000;
 const SELF_REFRESH_MAX_PAGES = 18;
 const SELF_REFRESH_MAX_PRODUCTS = 200;
 const SELF_REFRESH_PRODUCT_PATH_HINTS = ["/product", "/products", "/shop/", "/item/", "/p/"];
+
+// ‼️ بخش ۱ - جدید — تنظیمات مخصوص اعتبارسنجی توکن گیت‌هاب
+const GITHUB_API_BASE = "https://api.github.com";
+const GITHUB_API_UA = "AI-Shop-Assistant-ImageStore/1.0";
+const GITHUB_VALIDATE_TIMEOUT_MS = 10000;
 
 function json(data, status, extraHeaders) {
   var headers = {
@@ -83,13 +67,155 @@ async function getOrCreateToken(env) {
   return token;
 }
 
-// ‼️ صفحه‌ی جدید: یک دکمه‌ی اصلی «اتصال خودکار» (می‌خواند از کلیپ‌بورد،
-// بدون نیاز به تایپ) + یک کادر متنی کوچک‌تر به‌عنوان پشتیبان دستی.
-// جاوااسکریپت همین صفحه (نه فروشنده) کار زیر را انجام می‌دهد:
-//   ۱) از مسیر داخلی /internal-token (هم‌مبدأ، بدون CORS) توکن را می‌خواند
-//   ۲) آدرس خودش را از window.location.origin می‌گیرد
-//   ۳) کد را یا از کلیپ‌بورد (خودکار) یا از کادر متنی (دستی) می‌گیرد
-//   ۴) هر سه را به سرور مرکزی می‌فرستد
+// ══════════════════════════════════════════════════════════════════════
+// ‼️ بخش ۱ - جدید — کمکی‌های مستقل برای پیکربندی ذخیره‌سازی عکس در گیت‌هاب
+// هیچ‌کدام از این توابع در جای دیگری از فایل فراخوانی نمی‌شوند مگر همان
+// دو مسیر جدید (/save-image-config و /image-config-status) پایین‌تر.
+// ══════════════════════════════════════════════════════════════════════
+
+// آدرس مخزن را که فروشنده به هر شکلی (با https://, بدون آن, با اسلش
+// انتهایی, با .git) وارد کند، به {owner, repo} تمیز تبدیل می‌کند.
+function parseGithubRepoUrl(raw) {
+  if (!raw) return null;
+  var cleaned = String(raw).trim();
+  cleaned = cleaned.replace(/^https?:\/\/(www\.)?github\.com\//i, "");
+  cleaned = cleaned.replace(/\.git$/i, "");
+  cleaned = cleaned.replace(/^\/+|\/+$/g, "");
+  var parts = cleaned.split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  var owner = parts[0];
+  var repo = parts[1];
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) return null;
+  return { owner: owner, repo: repo };
+}
+
+// یک تماس واقعی و سبک به گیت‌هاب می‌زند تا مطمئن شود توکن معتبر است و
+// واقعاً به همان مخزن دسترسی نوشتن دارد. هرگز throw نمی‌کند.
+async function validateGithubAccess(owner, repo, token) {
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function () {
+    controller.abort();
+  }, GITHUB_VALIDATE_TIMEOUT_MS);
+
+  try {
+    var res = await fetch(
+      GITHUB_API_BASE + "/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo),
+      {
+        headers: {
+          Authorization: "Bearer " + token,
+          "User-Agent": GITHUB_API_UA,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        signal: controller.signal,
+      }
+    );
+    clearTimeout(timeoutId);
+
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, error: "توکن معتبر نیست یا دسترسی کافی به این مخزن ندارد." };
+    }
+    if (res.status === 404) {
+      return { ok: false, error: "این مخزن پیدا نشد. آدرس را دوباره بررسی کنید یا مطمئن شوید توکن به آن دسترسی دارد." };
+    }
+    if (!res.ok) {
+      return { ok: false, error: "گیت‌هاب پاسخ غیرمنتظره‌ای داد (HTTP " + res.status + ")." };
+    }
+
+    var data = await res.json();
+    var permissions = data && data.permissions;
+    var canPush = !!(permissions && permissions.push);
+    if (!canPush) {
+      return {
+        ok: false,
+        error:
+          "توکن به این مخزن متصل شد، اما اجازه‌ی «نوشتن» (Read and write روی Contents) ندارد. لطفاً توکن را دوباره با دسترسی درست بسازید.",
+      };
+    }
+
+    return { ok: true, defaultBranch: data.default_branch || "main", fullName: data.full_name || owner + "/" + repo };
+  } catch (e) {
+    clearTimeout(timeoutId);
+    return { ok: false, error: "اتصال به گیت‌هاب برقرار نشد. اتصال اینترنت را بررسی کنید و دوباره تلاش کنید." };
+  }
+}
+
+async function handleSaveImageConfig(request, env) {
+  var body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return json({ error: "بدنه‌ی درخواست نامعتبر است" }, 400);
+  }
+  if (!body || !body.repoUrl || !body.githubToken) {
+    return json({ error: "آدرس مخزن و توکن هر دو لازم هستند" }, 400);
+  }
+
+  var parsedRepo = parseGithubRepoUrl(body.repoUrl);
+  if (!parsedRepo) {
+    return json(
+      { error: "آدرس مخزن نامعتبر است. باید چیزی شبیه github.com/username/shop-catalog-template باشد." },
+      400
+    );
+  }
+
+  var token = String(body.githubToken).trim();
+  if (!token) {
+    return json({ error: "توکن نمی‌تواند خالی باشد" }, 400);
+  }
+
+  var validation = await validateGithubAccess(parsedRepo.owner, parsedRepo.repo, token);
+  if (!validation.ok) {
+    return json({ error: validation.error }, 400);
+  }
+
+  await env.CATALOG_KV.put(
+    IMAGE_CONFIG_KEY,
+    JSON.stringify({
+      owner: parsedRepo.owner,
+      repo: parsedRepo.repo,
+      defaultBranch: validation.defaultBranch,
+      githubToken: token,
+      savedAt: Date.now(),
+    })
+  );
+
+  return json({
+    ok: true,
+    repoFullName: validation.fullName,
+    message: "انبار ذخیره‌سازی عکس با موفقیت متصل و تأیید شد.",
+  });
+}
+
+// وضعیت فعلی را برمی‌گرداند، ولی هرگز خودِ توکن را در پاسخ نمی‌فرستد —
+// این مسیر توسط جاوااسکریپت همین صفحه صدا زده می‌شود تا وضعیت را نشان دهد.
+async function handleImageConfigStatus(env) {
+  var raw = await env.CATALOG_KV.get(IMAGE_CONFIG_KEY);
+  if (!raw) {
+    return json({ configured: false });
+  }
+  var cfg;
+  try {
+    cfg = JSON.parse(raw);
+  } catch (e) {
+    return json({ configured: false });
+  }
+  return json({
+    configured: true,
+    repoFullName: cfg.owner + "/" + cfg.repo,
+    savedAt: cfg.savedAt || null,
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// پایان بخش ۱ (زیرساخت ذخیره‌سازی عکس)
+// ══════════════════════════════════════════════════════════════════════
+
+// ‼️ صفحه‌ی landing — به بخش قبلی (اتصال خودکار) دست نخورده، فقط یک
+// کارت جدید («۲) اتصال انبار عکس») به‌صورت کاملاً مستقل زیرش اضافه شده.
+// جاوااسکریپت این کارت جدید کاملاً مستقل از جاوااسکریپت بالای صفحه است؛
+// اگر این بخش جدید هر خطایی بدهد، بخش «اتصال خودکار» بالای صفحه دقیقاً
+// مثل قبل کار می‌کند.
 function landingPageHtml() {
   return (
     "<!DOCTYPE html>" +
@@ -100,8 +226,9 @@ function landingPageHtml() {
     "body{font-family:Tahoma,Vazirmatn,sans-serif;background:#FAF6ED;margin:0;padding:24px;" +
     "display:flex;align-items:center;justify-content:center;min-height:100vh;box-sizing:border-box;}" +
     ".card{background:#fff;border-radius:16px;padding:28px 22px;max-width:420px;width:100%;" +
-    "box-shadow:0 10px 30px rgba(0,0,0,.08);text-align:center;}" +
+    "box-shadow:0 10px 30px rgba(0,0,0,.08);text-align:center;margin-bottom:18px;}" +
     "h1{font-size:19px;color:#0A3838;margin:0 0 10px;}" +
+    "h2{font-size:16px;color:#0A3838;margin:0 0 10px;}" +
     "p{color:#55524A;font-size:14px;line-height:1.7;margin:0 0 20px;}" +
     ".primary-btn{width:100%;padding:16px;font-size:16px;font-weight:800;color:#fff;" +
     "background:#0E4B4B;border:none;border-radius:12px;cursor:pointer;margin-bottom:10px;}" +
@@ -112,13 +239,22 @@ function landingPageHtml() {
     "input{width:100%;box-sizing:border-box;padding:14px;font-size:20px;letter-spacing:4px;" +
     "text-align:center;border:2px solid #E1D9C4;border-radius:10px;margin-bottom:14px;" +
     "direction:ltr;text-transform:uppercase;}" +
+    "input.wide{font-size:13px;letter-spacing:0;text-transform:none;text-align:left;}" +
     "button.secondary{width:100%;padding:14px;font-size:15px;font-weight:700;color:#0A3838;" +
     "background:#D9A441;border:none;border-radius:10px;cursor:pointer;}" +
     "button:disabled{opacity:.5;}" +
     "#msg{margin-top:16px;font-size:13.5px;min-height:20px;}" +
+    "#imgMsg{margin-top:16px;font-size:13.5px;min-height:20px;text-align:right;}" +
     ".ok{color:#1f5c3a;} .err{color:#8a4b1c;}" +
+    ".field-label{display:block;text-align:right;font-size:12.5px;font-weight:700;color:#0A3838;margin:0 0 6px;}" +
+    ".help-box{text-align:right;background:#F1EEE4;border-radius:10px;padding:14px 16px;margin-top:14px;" +
+    "font-size:12.5px;color:#55524A;line-height:2;}" +
+    ".help-box ol{padding-inline-start:20px;margin:6px 0;}" +
+    ".status-pill{display:inline-block;font-size:12px;font-weight:700;padding:4px 12px;border-radius:999px;margin-bottom:12px;}" +
+    ".status-pill.on{background:#e4f4ea;color:#1f5c3a;}" +
+    ".status-pill.off{background:#fdece0;color:#8a4b1c;}" +
     "</style></head><body>" +
-    '<div class="card">' +
+    '<div><div class="card">' +
     "<h1>🔗 اتصال انبار فروشگاه</h1>" +
     "<p>کدی که از سایت دستیار خرید گرفته‌اید همین الان در کلیپ‌بورد گوشی شماست. فقط دکمه‌ی زیر را بزنید.</p>" +
     '<button id="autoBtn" class="primary-btn" onclick="doAutoClaim()">⚡ اتصال خودکار</button>' +
@@ -129,9 +265,43 @@ function landingPageHtml() {
     "</div>" +
     '<div id="msg"></div>' +
     "</div>" +
+
+    '<div class="card" style="text-align:right;">' +
+    "<h2 style=\"text-align:center;\">🖼️ ۲) اتصال انبار عکس (پیشنهاد می‌شود)</h2>" +
+    '<div id="imgStatusPill" class="status-pill off" style="display:block;text-align:center;">در حال بررسی وضعیت...</div>' +
+    "<p>این بخش باعث می‌شود عکس محصولات شما با بالاترین کیفیت، در مخزن گیت‌هاب خودتان (همانی که با دکمه‌ی نارنجی بالا ساختید) ذخیره شود — رایگان، بدون کارت بانکی، و کاملاً روی حساب خودتان.</p>" +
+    '<label class="field-label">آدرس مخزن گیت‌هاب شما</label>' +
+    '<input id="repoUrlInput" class="wide" type="text" placeholder="github.com/username-شما/shop-catalog-template">' +
+    '<label class="field-label">توکن گیت‌هاب (Fine-grained token)</label>' +
+    '<input id="githubTokenInput" class="wide" type="password" placeholder="github_pat_...">' +
+    '<button id="saveImgConfigBtn" class="secondary" onclick="saveImageConfig()">💾 ذخیره و تست اتصال</button>' +
+    '<button type="button" class="fallback-toggle" onclick="toggleImgHelp()" style="display:block;margin:10px auto 0;">نمی‌دانم این توکن چیست و از کجا بسازم؟</button>' +
+    '<div id="imgHelpBox" class="help-box" style="display:none;">' +
+    "<b>این توکن یک «کلید محدود» است که فقط اجازه می‌دهد ابزار ما در همان یک مخزن شما عکس بنویسد؛ به هیچ چیز دیگری در حساب گیت‌هاب شما دسترسی ندارد.</b>" +
+    "<ol>" +
+    "<li>در مرورگر گوشی‌تان به آدرس <b>github.com</b> بروید و با همان حسابی که هنگام ساخت انبار ذخیره‌سازی (دکمه‌ی نارنجی بالا) استفاده کردید، وارد شوید.</li>" +
+    "<li>روی عکس پروفایل‌تان (گوشه‌ی بالا سمت راست صفحه) بزنید و «Settings» را انتخاب کنید.</li>" +
+    "<li>پایین‌ترین صفحه را باز کنید و روی «Developer settings» بزنید (آخرین گزینه‌ی منوی سمت چپ/پایین است).</li>" +
+    "<li>روی «Personal access tokens» بزنید، سپس روی «Fine-grained tokens».</li>" +
+    "<li>دکمه‌ی «Generate new token» را بزنید.</li>" +
+    "<li>در قسمت «Token name» هر اسمی دلخواه بنویسید، مثلاً: AI-Shop-Images</li>" +
+    "<li>در قسمت «Expiration»، طولانی‌ترین گزینه‌ی موجود (معمولاً ۳۶۶ روز یا No expiration) را انتخاب کنید. اگر «No expiration» نبود، همان ۳۶۶ روز کافی است — نزدیک آن تاریخ باید یک توکن جدید بسازید.</li>" +
+    "<li>در «Repository access» گزینه‌ی «Only select repositories» را بزنید، سپس همان مخزنی که در بالای همین صفحه آدرسش را وارد کردید (معمولاً به اسم shop-catalog-template) را از لیست پیدا و انتخاب کنید.</li>" +
+    "<li>پایین‌تر بروید تا «Permissions» را ببینید؛ روی «Repository permissions» بزنید، دنبال ردیف «Contents» بگردید و مقابلش را از «No access» به «Read and write» تغییر دهید.</li>" +
+    "<li>پایین صفحه را باز کنید و دکمه‌ی سبز «Generate token» را بزنید.</li>" +
+    "<li>یک متن طولانی که با <b>github_pat_</b> شروع می‌شود نشان داده می‌شود. روی آیکون کپی کنارش بزنید — این تنها فرصت شماست برای دیدن آن؛ اگر از این صفحه بیرون بروید دیگر نمایش داده نمی‌شود.</li>" +
+    "<li>به همین صفحه برگردید، آن متن کپی‌شده را در کادر «توکن گیت‌هاب» بالا بچسبانید (لمس‌نگه‌دارید روی کادر و «Paste» را بزنید)، سپس روی «ذخیره و تست اتصال» بزنید.</li>" +
+    "</ol>" +
+    "</div>" +
+    '<div id="imgMsg"></div>' +
+    "</div></div>" +
     "<script>" +
     "function toggleManual(){" +
     'var box=document.getElementById("manualBox");' +
+    'box.style.display = box.style.display==="block" ? "none" : "block";' +
+    "}" +
+    "function toggleImgHelp(){" +
+    'var box=document.getElementById("imgHelpBox");' +
     'box.style.display = box.style.display==="block" ? "none" : "block";' +
     "}" +
     "async function claimWithCode(code){" +
@@ -187,14 +357,63 @@ function landingPageHtml() {
     "var ok=await claimWithCode(code);" +
     "if(!ok){}" +
     "}" +
+    // ‼️ بخش ۱ - جدید — جاوااسکریپت کارت «اتصال انبار عکس»
+    "async function refreshImageStatus(){" +
+    'var pill=document.getElementById("imgStatusPill");' +
+    "try{" +
+    'var res=await fetch("/image-config-status");' +
+    "var data=await res.json();" +
+    "if(data && data.configured){" +
+    'pill.className="status-pill on";' +
+    'pill.textContent="✅ متصل — انبار: "+data.repoFullName;' +
+    "}else{" +
+    'pill.className="status-pill off";' +
+    'pill.textContent="⏳ هنوز متصل نشده";' +
+    "}" +
+    "}catch(e){" +
+    'pill.className="status-pill off";' +
+    'pill.textContent="⏳ هنوز متصل نشده";' +
+    "}" +
+    "}" +
+    "async function saveImageConfig(){" +
+    'var repoInput=document.getElementById("repoUrlInput");' +
+    'var tokenInput=document.getElementById("githubTokenInput");' +
+    'var btn=document.getElementById("saveImgConfigBtn");' +
+    'var msgEl=document.getElementById("imgMsg");' +
+    "var repoUrl=repoInput.value.trim();" +
+    "var token=tokenInput.value.trim();" +
+    "if(!repoUrl || !token){" +
+    'msgEl.className="err";msgEl.textContent="لطفاً هم آدرس مخزن و هم توکن را وارد کنید.";' +
+    "return;" +
+    "}" +
+    "btn.disabled=true;" +
+    'msgEl.className="";msgEl.textContent="در حال تست اتصال به گیت‌هاب...";' +
+    "try{" +
+    'var res=await fetch("/save-image-config",{' +
+    'method:"POST",headers:{"Content-Type":"application/json"},' +
+    "body:JSON.stringify({repoUrl:repoUrl,githubToken:token})});" +
+    "var data=await res.json();" +
+    "if(!res.ok){" +
+    'msgEl.className="err";msgEl.textContent=data.error||"اتصال ناموفق بود.";' +
+    "btn.disabled=false;" +
+    "return;" +
+    "}" +
+    'msgEl.className="ok";msgEl.textContent="✅ "+data.message+" ("+data.repoFullName+")";' +
+    "tokenInput.value=\"\";" +
+    "btn.disabled=false;" +
+    "refreshImageStatus();" +
+    "}catch(e){" +
+    'msgEl.className="err";msgEl.textContent="اتصال به سرور برقرار نشد. اینترنت را بررسی کنید.";' +
+    "btn.disabled=false;" +
+    "}" +
+    "}" +
+    "refreshImageStatus();" +
     "</script></body></html>"
   );
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// ‼️ جدید — بخش خودکفای «بروزرسانی خودکار ساعتی» (self-refresh).
-// همه‌ی کمکی‌های زیر مستقل و کامل‌اند؛ هیچ‌کدام به سرور مرکزی من یا به
-// هیچ چیز خارج از همین Worker وابسته نیستند.
+// ‼️ بخش self-refresh (بدون تغییر نسبت به نسخه‌ی قبلی)
 // ══════════════════════════════════════════════════════════════════════
 
 function isPrivateOrDisallowedHost(hostname) {
@@ -260,9 +479,6 @@ async function selfFetchText(url) {
   }
 }
 
-// ‼️ برخلاف نسخه‌ی سرور مرکزی که robots.txt را به‌ازای هر صفحه دوباره
-// می‌خواند، این نسخه فقط یک‌بار در کل چرخه می‌خواند و قوانین را
-// برمی‌گرداند — برای صرفه‌جویی در سقف ۵۰ ساب‌ریکوئست حساب فروشنده.
 async function fetchRobotsDisallowRules(origin) {
   var text = await selfFetchText(origin + "/robots.txt");
   if (!text) return [];
@@ -404,9 +620,6 @@ async function findCandidateLinksSelf(origin) {
   return [origin];
 }
 
-// خزیدن سبک و محتاطانه: robots.txt فقط یک‌بار خوانده می‌شود، تعداد
-// صفحات محدود است، و هر خطای غیرمنتظره روی یک صفحه فقط همان صفحه را
-// نادیده می‌گیرد، نه کل چرخه را متوقف می‌کند.
 async function selfCrawl(origin) {
   var links = await findCandidateLinksSelf(origin);
   var disallowRules = await fetchRobotsDisallowRules(origin);
@@ -440,13 +653,10 @@ async function selfCrawl(origin) {
   return products;
 }
 
-// نقطه‌ی ورود چرخه‌ی خودکار ساعتی. عمداً هیچ‌گاه throw نمی‌کند — بدترین
-// حالت این است که این چرخه بی‌نتیجه تمام شود و کاتالوگ فعلی دست‌نخورده
-// بماند تا ساعت بعد دوباره تلاش شود.
 async function runSelfRefreshCycle(env) {
   try {
     var raw = await env.CATALOG_KV.get(CATALOG_KEY);
-    if (!raw) return; // هنوز هیچ اتصالی کامل نشده؛ چیزی برای بروزرسانی نیست
+    if (!raw) return;
 
     var current;
     try {
@@ -472,9 +682,6 @@ async function runSelfRefreshCycle(env) {
     var directProducts = await tryDirectProductsApi(origin);
     var products = directProducts || (await selfCrawl(cleanOrigin));
 
-    // اگر این چرخه هیچ محصولی پیدا نکرد (مثلاً سایت موقتاً در دسترس
-    // نبود)، به‌جای جایگزینی کاتالوگ خوب قبلی با یک نتیجه‌ی خالی،
-    // کاتالوگ فعلی را دست‌نخورده نگه می‌داریم.
     if (!products || !products.length) return;
 
     await env.CATALOG_KV.put(
@@ -486,9 +693,7 @@ async function runSelfRefreshCycle(env) {
       })
     );
   } catch (unexpectedErr) {
-    // هر خطای پیش‌بینی‌نشده‌ی دیگری (شامل برخورد به سقف CPU/زمان رایگان
-    // Cloudflare) اینجا بی‌سروصدا بلعیده می‌شود. کاتالوگ فعلی سالم
-    // می‌ماند و چرخه‌ی بعدی (۱ ساعت دیگر) خودکار دوباره تلاش می‌کند.
+    // بی‌سروصدا بلعیده می‌شود؛ ساعت بعد دوباره تلاش می‌شود.
   }
 }
 
@@ -510,19 +715,15 @@ export default {
       });
     }
 
-    // صفحه‌ی اصلی و ساده‌ی اتصال (این چیزی است که فروشنده باز می‌کند)
     if (url.pathname === "/" && request.method === "GET") {
       return html(landingPageHtml());
     }
 
-    // فقط خودِ همین صفحه (هم‌مبدأ) این مسیر را می‌خواند؛ فروشنده هرگز
-    // مستقیم به این آدرس نمی‌رود و توکن را نمی‌بیند.
     if (url.pathname === "/internal-token" && request.method === "GET") {
       var tokenForPage = await getOrCreateToken(env);
       return json({ token: tokenForPage });
     }
 
-    // ── مسیر قدیمی (JSON خام) — فقط برای عیب‌یابی دستی نگه داشته شده ──
     if (url.pathname === "/setup" && request.method === "GET") {
       var token = await getOrCreateToken(env);
       return json({
@@ -533,7 +734,6 @@ export default {
       });
     }
 
-    // ── فقط سرور مرکزی (با توکن درست) اجازه‌ی نوشتن محصولات دارد ──
     if (url.pathname === "/update" && request.method === "POST") {
       var auth = request.headers.get("Authorization") || "";
       var validToken = await getOrCreateToken(env);
@@ -560,7 +760,6 @@ export default {
       return json({ ok: true, productCount: body.products.length });
     }
 
-    // ── خریداران مستقیم از همین‌جا می‌خوانند — عمومی، کش‌شونده ──
     if (url.pathname === "/catalog" && request.method === "GET") {
       var raw = await env.CATALOG_KV.get(CATALOG_KEY);
       if (!raw) {
@@ -572,12 +771,17 @@ export default {
       return json(data, 200, { "Cache-Control": "public, max-age=300" });
     }
 
+    // ‼️ بخش ۱ - جدید — دو مسیر تازه برای پیکربندی ذخیره‌سازی عکس
+    if (url.pathname === "/save-image-config" && request.method === "POST") {
+      return handleSaveImageConfig(request, env);
+    }
+    if (url.pathname === "/image-config-status" && request.method === "GET") {
+      return handleImageConfigStatus(env);
+    }
+
     return json({ error: "مسیر یافت نشد" }, 404);
   },
 
-  // ‼️ جدید — نقطه‌ی ورود Cron Trigger. بازه‌ی زمانی در wrangler.toml
-  // همین قالب تعریف شده (هر ۱ ساعت). ctx.waitUntil تضمین می‌کند که
-  // اجرای غیرهمزمانِ چرخه، پیش از پایان اجرای Worker، کامل می‌شود.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runSelfRefreshCycle(env));
   },
