@@ -1,32 +1,55 @@
 /**
  * worker.js — این فایل روی حساب شخصی خودِ فروشنده اجرا می‌شود، نه حساب من.
  *
- * ‼️ بخش ۱ - جدید (زیرساخت ذخیره‌سازی عکس):
- * این نسخه یک بخش کاملاً جدید و مستقل اضافه می‌کند که به فروشنده اجازه
- * می‌دهد یک «توکن گیت‌هاب محدود» و «آدرس مخزن خودش» را وارد کند. این دو
- * مقدار، بعد از یک تست اعتبارسنجی واقعی روی گیت‌هاب، در KV همین Worker
- * (یعنی حساب خودِ فروشنده، نه سرور مرکزی من) ذخیره می‌شوند.
+ * ‼️ بخش ۱ (زیرساخت ذخیره‌سازی عکس):
+ * یک بخش مستقل به فروشنده اجازه می‌دهد یک «توکن گیت‌هاب محدود» و «آدرس
+ * مخزن خودش» را وارد کند. این دو مقدار، بعد از یک تست اعتبارسنجی واقعی
+ * روی گیت‌هاب، در KV همین Worker (یعنی حساب خودِ فروشنده، نه سرور مرکزی
+ * من) ذخیره می‌شوند. (بدون تغییر نسبت به قبل)
  *
- * ‼️ مهم: در همین بخش (۱)، هیچ عکسی خزیده، دانلود یا آپلود نمی‌شود.
- * فقط زیرساخت (گرفتن و ذخیره‌ی امن اعتبارنامه) ساخته شده. خزش و آپلود
- * واقعی عکس‌ها در «بخش ۲» پیاده‌سازی خواهد شد و از همین پیکربندی که
- * اینجا ذخیره می‌شود استفاده می‌کند.
+ * ‼️ بخش ۲ - جدید (خزش و آپلود خودکار عکس‌ها):
+ * در همان چرخه‌ی ساعتی self-refresh که از قبل محصولات را می‌خزد، حالا
+ * یک مرحله‌ی اضافی هم اجرا می‌شود:
+ *   ۱) اگر فروشنده هنوز «بخش ۱» را انجام نداده (یعنی env.CATALOG_KV
+ *      کلید image-config را ندارد)، این مرحله کاملاً رد می‌شود — هیچ
+ *      رفتاری نسبت به قبل از این تغییر عوض نمی‌شود.
+ *   ۲) اگر انجام داده باشد، برای هر محصولی که فیلد image دارد:
+ *      - اگر همان آدرس عکس در چرخه‌ی قبلی قبلاً موفق آپلود شده بود
+ *        (یعنی در کاتالوگ ذخیره‌شده‌ی قبلی یک image_cdn برایش ثبت شده)،
+ *        همان آدرس CDN قبلی دوباره استفاده می‌شود — هیچ دانلود یا
+ *        آپلود تکراری‌ای اتفاق نمی‌افتد.
+ *      - در غیر این صورت، اگر هنوز به سقف ۱۲ آپلود-جدید-در-این-چرخه
+ *        نرسیده باشیم، عکس یک‌بار دانلود می‌شود، نامش بر اساس هش
+ *        SHA-256 محتوای خودِ عکس ساخته می‌شود (یعنی محتوای تکراری هرگز
+ *        دوباره آپلود نمی‌شود)، و از طریق GitHub Contents API در همان
+ *        مخزن فروشنده (پوشه‌ی images/) نوشته می‌شود.
+ *      - آدرس نهایی و همیشگی آن عکس، یک لینک jsDelivr است که مستقیم از
+ *        همان مخزن گیت‌هاب فروشنده سرو می‌شود؛ در فیلد جدید image_cdn
+ *        کنار همان محصول در کاتالوگ ذخیره می‌شود.
+ *   ۳) سقف ۱۲ آپلود در هر چرخه عمداً محافظه‌کارانه انتخاب شده تا در کنار
+ *      خزش خودِ سایت (که خودش تا ۱۹ ساب‌ریکوئست مصرف می‌کند: ۱۸ صفحه +
+ *      ۱ robots.txt)، مجموع از سقف ۵۰ ساب‌ریکوئست رایگان هر اجرای Worker
+ *      رد نشود (۱۹ + ۱۲×۲ = ۴۳، هنوز زیر ۵۰). برای فروشگاه‌های بزرگ،
+ *      عکس‌ها به‌تدریج، ساعت به ساعت، کامل می‌شوند — نه همه یک‌جا.
+ *   ۴) هر خطا در این مرحله (چه در یک عکس خاص، چه در کل مرحله) کاملاً
+ *      بی‌سروصدا بلعیده می‌شود؛ کاتالوگ متنی همیشه ذخیره می‌شود، حتی اگر
+ *      آپلود عکس‌ها آن ساعت به هر دلیلی شکست بخورد.
  *
- * هیچ منطق دیگری (fetch handler قبلی، مسیرهای /، /internal-token، /setup،
- * /update، /catalog، صفحه‌ی landing قبلی، دکمه‌ی «اتصال خودکار»، Cron
- * Trigger و چرخه‌ی self-refresh) تغییر نکرده است.
+ * هیچ منطق دیگری (fetch handler، مسیرهای /، /internal-token، /setup،
+ * /update، /catalog، /save-image-config، /image-config-status، صفحه‌ی
+ * landing، دکمه‌ی «اتصال خودکار»، Cron Trigger) تغییر نکرده است.
  */
 
 const CATALOG_KEY = "catalog";
 const TOKEN_KEY = "update-token";
-const IMAGE_CONFIG_KEY = "image-config"; // ‼️ بخش ۱ - جدید
+const IMAGE_CONFIG_KEY = "image-config";
 
 // ‼️ آدرس سرور مرکزی — همانی که در سایت ما (worker.js اصلی) هست.
 const CENTRAL_SERVER_URL = "https://shop-assistant.laana9258.workers.dev";
 
-// ‼️ جدید — تنظیمات مخصوص چرخه‌ی خودکار ساعتی (self-refresh). این
-// اعداد عمداً محتاطانه انتخاب شده‌اند تا داخل سقف رایگان (۵۰ ساب‌ریکوئست،
-// ۱۰ میلی‌ثانیه CPU در هر اجرا) بمانند، حتی برای فروشگاه‌های نسبتاً بزرگ.
+// ‼️ تنظیمات مخصوص چرخه‌ی خودکار ساعتی (self-refresh). این اعداد عمداً
+// محتاطانه انتخاب شده‌اند تا داخل سقف رایگان (۵۰ ساب‌ریکوئست، ۱۰
+// میلی‌ثانیه CPU در هر اجرا) بمانند، حتی برای فروشگاه‌های نسبتاً بزرگ.
 const SELF_REFRESH_BOT_UA =
   "SA-ShopSelfRefresh/1.0 (+https://ai-assistant-cpl.pages.dev/bot-info)";
 const SELF_REFRESH_FETCH_TIMEOUT_MS = 10000;
@@ -35,10 +58,16 @@ const SELF_REFRESH_MAX_PAGES = 18;
 const SELF_REFRESH_MAX_PRODUCTS = 200;
 const SELF_REFRESH_PRODUCT_PATH_HINTS = ["/product", "/products", "/shop/", "/item/", "/p/"];
 
-// ‼️ بخش ۱ - جدید — تنظیمات مخصوص اعتبارسنجی توکن گیت‌هاب
+// ‼️ تنظیمات مخصوص اعتبارسنجی توکن گیت‌هاب (بخش ۱)
 const GITHUB_API_BASE = "https://api.github.com";
 const GITHUB_API_UA = "AI-Shop-Assistant-ImageStore/1.0";
 const GITHUB_VALIDATE_TIMEOUT_MS = 10000;
+
+// ‼️ بخش ۲ - جدید — تنظیمات مخصوص خزش و آپلود عکس
+const IMAGE_UPLOAD_MAX_BYTES = 6 * 1024 * 1024; // بیش از ۶ مگابایت، آن عکس رد می‌شود
+const IMAGE_UPLOAD_MAX_PER_CYCLE = 12; // سقف آپلود «جدید» در هر اجرای ساعتی
+const IMAGE_UPLOAD_FETCH_TIMEOUT_MS = 10000;
+const GITHUB_UPLOAD_TIMEOUT_MS = 10000;
 
 function json(data, status, extraHeaders) {
   var headers = {
@@ -68,13 +97,10 @@ async function getOrCreateToken(env) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// ‼️ بخش ۱ - جدید — کمکی‌های مستقل برای پیکربندی ذخیره‌سازی عکس در گیت‌هاب
-// هیچ‌کدام از این توابع در جای دیگری از فایل فراخوانی نمی‌شوند مگر همان
-// دو مسیر جدید (/save-image-config و /image-config-status) پایین‌تر.
+// بخش ۱ — کمکی‌های مستقل برای پیکربندی ذخیره‌سازی عکس در گیت‌هاب
+// (بدون تغییر نسبت به نسخه‌ی قبلی)
 // ══════════════════════════════════════════════════════════════════════
 
-// آدرس مخزن را که فروشنده به هر شکلی (با https://, بدون آن, با اسلش
-// انتهایی, با .git) وارد کند، به {owner, repo} تمیز تبدیل می‌کند.
 function parseGithubRepoUrl(raw) {
   if (!raw) return null;
   var cleaned = String(raw).trim();
@@ -89,8 +115,6 @@ function parseGithubRepoUrl(raw) {
   return { owner: owner, repo: repo };
 }
 
-// یک تماس واقعی و سبک به گیت‌هاب می‌زند تا مطمئن شود توکن معتبر است و
-// واقعاً به همان مخزن دسترسی نوشتن دارد. هرگز throw نمی‌کند.
 async function validateGithubAccess(owner, repo, token) {
   var controller = new AbortController();
   var timeoutId = setTimeout(function () {
@@ -187,8 +211,6 @@ async function handleSaveImageConfig(request, env) {
   });
 }
 
-// وضعیت فعلی را برمی‌گرداند، ولی هرگز خودِ توکن را در پاسخ نمی‌فرستد —
-// این مسیر توسط جاوااسکریپت همین صفحه صدا زده می‌شود تا وضعیت را نشان دهد.
 async function handleImageConfigStatus(env) {
   var raw = await env.CATALOG_KV.get(IMAGE_CONFIG_KEY);
   if (!raw) {
@@ -208,14 +230,10 @@ async function handleImageConfigStatus(env) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// پایان بخش ۱ (زیرساخت ذخیره‌سازی عکس)
+// پایان بخش ۱
 // ══════════════════════════════════════════════════════════════════════
 
-// ‼️ صفحه‌ی landing — به بخش قبلی (اتصال خودکار) دست نخورده، فقط یک
-// کارت جدید («۲) اتصال انبار عکس») به‌صورت کاملاً مستقل زیرش اضافه شده.
-// جاوااسکریپت این کارت جدید کاملاً مستقل از جاوااسکریپت بالای صفحه است؛
-// اگر این بخش جدید هر خطایی بدهد، بخش «اتصال خودکار» بالای صفحه دقیقاً
-// مثل قبل کار می‌کند.
+// ‼️ صفحه‌ی landing — دقیقاً همان نسخه‌ی بخش ۱، بدون هیچ تغییری.
 function landingPageHtml() {
   return (
     "<!DOCTYPE html>" +
@@ -357,7 +375,6 @@ function landingPageHtml() {
     "var ok=await claimWithCode(code);" +
     "if(!ok){}" +
     "}" +
-    // ‼️ بخش ۱ - جدید — جاوااسکریپت کارت «اتصال انبار عکس»
     "async function refreshImageStatus(){" +
     'var pill=document.getElementById("imgStatusPill");' +
     "try{" +
@@ -413,7 +430,7 @@ function landingPageHtml() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// ‼️ بخش self-refresh (بدون تغییر نسبت به نسخه‌ی قبلی)
+// بخش self-refresh — خزش متن (بدون تغییر نسبت به نسخه‌ی قبلی)
 // ══════════════════════════════════════════════════════════════════════
 
 function isPrivateOrDisallowedHost(hostname) {
@@ -653,6 +670,253 @@ async function selfCrawl(origin) {
   return products;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// ‼️ بخش ۲ - جدید — خزش و آپلود خودکار عکس‌ها به مخزن گیت‌هاب فروشنده
+// هیچ‌کدام از این توابع در جای دیگری از فایل فراخوانی نمی‌شوند مگر
+// runSelfRefreshCycle در پایین همین بخش.
+// ══════════════════════════════════════════════════════════════════════
+
+// یک بافر باینری را به هگز SHA-256 تبدیل می‌کند (برای نام‌گذاری فایل
+// عکس بر اساس محتوای خودش، نه بر اساس آدرس یا شماره‌ی محصول — این یعنی
+// یک عکس تکراری هرگز دوباره آپلود نمی‌شود).
+async function sha256Hex(arrayBuffer) {
+  var digest = await crypto.subtle.digest("SHA-256", arrayBuffer);
+  var bytes = new Uint8Array(digest);
+  var hex = "";
+  for (var i = 0; i < bytes.length; i++) {
+    var h = bytes[i].toString(16);
+    if (h.length < 2) h = "0" + h;
+    hex += h;
+  }
+  return hex;
+}
+
+// یک Uint8Array را به Base64 تبدیل می‌کند؛ به‌صورت تکه‌تکه (chunk) تا
+// برای عکس‌های بزرگ به خطای سرریز پشته (stack overflow) نخوریم.
+function uint8ToBase64(bytes) {
+  var CHUNK_SIZE = 8192;
+  var binary = "";
+  for (var i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    var chunk = bytes.subarray(i, i + CHUNK_SIZE);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+
+// پسوند فایل را از Content-Type پاسخ یا، در نبود آن، از خودِ آدرس عکس حدس می‌زند.
+function guessImageExtension(contentType, imageUrl) {
+  var ct = String(contentType || "").toLowerCase();
+  if (ct.indexOf("png") !== -1) return "png";
+  if (ct.indexOf("webp") !== -1) return "webp";
+  if (ct.indexOf("gif") !== -1) return "gif";
+  if (ct.indexOf("jpeg") !== -1 || ct.indexOf("jpg") !== -1) return "jpg";
+  try {
+    var pathname = new URL(imageUrl).pathname.toLowerCase();
+    var m = pathname.match(/\.(png|webp|gif|jpe?g)$/);
+    if (m) return m[1] === "jpeg" ? "jpg" : m[1];
+  } catch (e) {}
+  return "jpg";
+}
+
+// عکس را از آدرس اصلی‌اش (روی سایت فروشنده) دانلود می‌کند. همان
+// محافظت‌های SSRF چرخه‌ی خزش متن (خانه‌های خصوصی/داخلی ممنوع) را دارد.
+// هرگز throw نمی‌کند؛ در صورت هر مشکلی null برمی‌گرداند.
+async function downloadImageBytes(imageUrl) {
+  var parsed;
+  try {
+    parsed = new URL(imageUrl);
+  } catch (e) {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  if (isPrivateOrDisallowedHost(parsed.hostname)) return null;
+
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function () {
+    controller.abort();
+  }, IMAGE_UPLOAD_FETCH_TIMEOUT_MS);
+
+  try {
+    var res = await fetch(imageUrl, {
+      headers: { "User-Agent": SELF_REFRESH_BOT_UA, Accept: "image/*" },
+      redirect: "follow",
+      signal: controller.signal,
+      cf: { cacheTtl: 0 },
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) return null;
+
+    var contentType = res.headers.get("content-type") || "";
+    var buffer = await res.arrayBuffer();
+    if (!buffer || buffer.byteLength === 0 || buffer.byteLength > IMAGE_UPLOAD_MAX_BYTES) {
+      return null;
+    }
+    return { bytes: new Uint8Array(buffer), buffer: buffer, contentType: contentType };
+  } catch (e) {
+    clearTimeout(timeoutId);
+    return null;
+  }
+}
+
+// عکس را در مخزن گیت‌هاب فروشنده، در مسیر مشخص‌شده، آپلود می‌کند.
+// چون مسیر فایل بر اساس هش محتوای خودِ عکس ساخته شده، اگر گیت‌هاب با
+// HTTP 422 پاسخ دهد (یعنی «این فایل از قبل وجود دارد»)، این خودش یعنی
+// همان محتوا از قبل آنجاست — پس همان را موفق در نظر می‌گیریم، نیازی به
+// یک درخواست جداگانه برای گرفتن sha و آپدیت نیست (صرفه‌جویی در سقف
+// ساب‌ریکوئست).
+async function uploadImageToGithub(imageConfig, path, base64Content) {
+  var apiUrl =
+    GITHUB_API_BASE +
+    "/repos/" +
+    encodeURIComponent(imageConfig.owner) +
+    "/" +
+    encodeURIComponent(imageConfig.repo) +
+    "/contents/" +
+    path;
+
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function () {
+    controller.abort();
+  }, GITHUB_UPLOAD_TIMEOUT_MS);
+
+  try {
+    var res = await fetch(apiUrl, {
+      method: "PUT",
+      headers: {
+        Authorization: "Bearer " + imageConfig.githubToken,
+        "User-Agent": GITHUB_API_UA,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: "افزودن عکس محصول (آپلود خودکار توسط دستیار خرید هوشمند)",
+        content: base64Content,
+        branch: imageConfig.defaultBranch || "main",
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (res.status === 200 || res.status === 201) return { ok: true };
+    if (res.status === 422) return { ok: true }; // فایل با همین محتوا از قبل وجود دارد
+    return { ok: false };
+  } catch (e) {
+    clearTimeout(timeoutId);
+    return { ok: false };
+  }
+}
+
+// یک عکس را کامل دانلود+آپلود می‌کند و در صورت موفقیت، آدرس دائمی
+// jsDelivr آن را برمی‌گرداند. در هر مرحله‌ای مشکلی پیش بیاید، null
+// برمی‌گرداند تا فراخواننده بدون توقف کل چرخه ادامه دهد.
+async function uploadOneImageAndGetCdnUrl(imageConfig, imageUrl) {
+  var downloaded = await downloadImageBytes(imageUrl);
+  if (!downloaded) return null;
+
+  var hash;
+  try {
+    hash = await sha256Hex(downloaded.buffer);
+  } catch (e) {
+    return null;
+  }
+
+  var ext = guessImageExtension(downloaded.contentType, imageUrl);
+  var path = "images/" + hash + "." + ext;
+
+  var base64Content;
+  try {
+    base64Content = uint8ToBase64(downloaded.bytes);
+  } catch (e) {
+    return null;
+  }
+
+  var uploadResult = await uploadImageToGithub(imageConfig, path, base64Content);
+  if (!uploadResult.ok) return null;
+
+  var branch = imageConfig.defaultBranch || "main";
+  return (
+    "https://cdn.jsdelivr.net/gh/" +
+    imageConfig.owner +
+    "/" +
+    imageConfig.repo +
+    "@" +
+    branch +
+    "/" +
+    path
+  );
+}
+
+// برای کل آرایه‌ی محصولات این چرخه، فیلد image_cdn را (در صورت امکان)
+// پر می‌کند. اگر فروشنده هنوز بخش ۱ را انجام نداده، بدون هیچ کاری
+// همان products را برمی‌گرداند (رفتار قبلی، دست‌نخورده).
+async function attachImageCdnUrls(env, products, previousProducts) {
+  var imageConfigRaw;
+  try {
+    imageConfigRaw = await env.CATALOG_KV.get(IMAGE_CONFIG_KEY);
+  } catch (e) {
+    return products;
+  }
+  if (!imageConfigRaw) return products;
+
+  var imageConfig;
+  try {
+    imageConfig = JSON.parse(imageConfigRaw);
+  } catch (e) {
+    return products;
+  }
+  if (!imageConfig || !imageConfig.owner || !imageConfig.repo || !imageConfig.githubToken) {
+    return products;
+  }
+
+  // نگاشت «آدرس اصلی عکس روی سایت فروشنده → آدرس CDN که قبلاً برایش
+  // آپلود شده» را از کاتالوگ چرخه‌ی قبلی می‌سازیم تا از دانلود/آپلود
+  // تکراری همان عکس جلوگیری شود.
+  var previousMap = {};
+  if (Array.isArray(previousProducts)) {
+    for (var i = 0; i < previousProducts.length; i++) {
+      var prev = previousProducts[i];
+      if (prev && prev.image && prev.image_cdn) {
+        previousMap[prev.image] = prev.image_cdn;
+      }
+    }
+  }
+
+  var uploadsUsedThisCycle = 0;
+
+  for (var j = 0; j < products.length; j++) {
+    var product = products[j];
+    if (!product || !product.image) continue;
+
+    var existingCdn = previousMap[product.image];
+    if (existingCdn) {
+      product.image_cdn = existingCdn;
+      continue;
+    }
+
+    if (uploadsUsedThisCycle >= IMAGE_UPLOAD_MAX_PER_CYCLE) {
+      // به سقف این چرخه رسیدیم؛ این محصول در چرخه‌ی ساعتی بعدی امتحان می‌شود
+      continue;
+    }
+
+    uploadsUsedThisCycle++;
+    try {
+      var cdnUrl = await uploadOneImageAndGetCdnUrl(imageConfig, product.image);
+      if (cdnUrl) {
+        product.image_cdn = cdnUrl;
+      }
+    } catch (perImageErr) {
+      // این یک عکس شکست خورد؛ بقیه‌ی چرخه بدون وقفه ادامه پیدا می‌کند
+    }
+  }
+
+  return products;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// پایان بخش ۲
+// ══════════════════════════════════════════════════════════════════════
+
 async function runSelfRefreshCycle(env) {
   try {
     var raw = await env.CATALOG_KV.get(CATALOG_KEY);
@@ -683,6 +947,16 @@ async function runSelfRefreshCycle(env) {
     var products = directProducts || (await selfCrawl(cleanOrigin));
 
     if (!products || !products.length) return;
+
+    // ‼️ بخش ۲ - جدید — تلاش برای پر کردن image_cdn روی محصولات این
+    // چرخه. هر خطای پیش‌بینی‌نشده در کل این مرحله بی‌سروصدا بلعیده
+    // می‌شود؛ کاتالوگ متنی زیر، در هر صورت (حتی اگر آپلود عکس شکست
+    // بخورد)، ذخیره می‌شود.
+    try {
+      products = await attachImageCdnUrls(env, products, current && current.products);
+    } catch (imageStageErr) {
+      // نادیده گرفته می‌شود؛ ادامه با همان products بدون image_cdn
+    }
 
     await env.CATALOG_KV.put(
       CATALOG_KEY,
@@ -771,7 +1045,6 @@ export default {
       return json(data, 200, { "Cache-Control": "public, max-age=300" });
     }
 
-    // ‼️ بخش ۱ - جدید — دو مسیر تازه برای پیکربندی ذخیره‌سازی عکس
     if (url.pathname === "/save-image-config" && request.method === "POST") {
       return handleSaveImageConfig(request, env);
     }
