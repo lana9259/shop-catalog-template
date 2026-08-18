@@ -1,48 +1,50 @@
 /**
  * worker.js — این فایل روی حساب شخصی خودِ فروشنده اجرا می‌شود، نه حساب من.
  *
- * ‼️ بخش ۱ (زیرساخت ذخیره‌سازی عکس):
- * یک بخش مستقل به فروشنده اجازه می‌دهد یک «توکن گیت‌هاب محدود» و «آدرس
- * مخزن خودش» را وارد کند. این دو مقدار، بعد از یک تست اعتبارسنجی واقعی
- * روی گیت‌هاب، در KV همین Worker (یعنی حساب خودِ فروشنده، نه سرور مرکزی
- * من) ذخیره می‌شوند. (بدون تغییر نسبت به قبل)
+ * ‼️ بخش ۱ (زیرساخت ذخیره‌سازی عکس): بدون تغییر نسبت به قبل.
+ * ‼️ بخش ۲ (خزش و آپلود خودکار عکس‌ها): بدون تغییر نسبت به قبل.
  *
- * ‼️ بخش ۲ - جدید (خزش و آپلود خودکار عکس‌ها):
- * در همان چرخه‌ی ساعتی self-refresh که از قبل محصولات را می‌خزد، حالا
- * یک مرحله‌ی اضافی هم اجرا می‌شود:
- *   ۱) اگر فروشنده هنوز «بخش ۱» را انجام نداده (یعنی env.CATALOG_KV
- *      کلید image-config را ندارد)، این مرحله کاملاً رد می‌شود — هیچ
- *      رفتاری نسبت به قبل از این تغییر عوض نمی‌شود.
- *   ۲) اگر انجام داده باشد، برای هر محصولی که فیلد image دارد:
- *      - اگر همان آدرس عکس در چرخه‌ی قبلی قبلاً موفق آپلود شده بود
- *        (یعنی در کاتالوگ ذخیره‌شده‌ی قبلی یک image_cdn برایش ثبت شده)،
- *        همان آدرس CDN قبلی دوباره استفاده می‌شود — هیچ دانلود یا
- *        آپلود تکراری‌ای اتفاق نمی‌افتد.
- *      - در غیر این صورت، اگر هنوز به سقف ۱۲ آپلود-جدید-در-این-چرخه
- *        نرسیده باشیم، عکس یک‌بار دانلود می‌شود، نامش بر اساس هش
- *        SHA-256 محتوای خودِ عکس ساخته می‌شود (یعنی محتوای تکراری هرگز
- *        دوباره آپلود نمی‌شود)، و از طریق GitHub Contents API در همان
- *        مخزن فروشنده (پوشه‌ی images/) نوشته می‌شود.
- *      - آدرس نهایی و همیشگی آن عکس، یک لینک jsDelivr است که مستقیم از
- *        همان مخزن گیت‌هاب فروشنده سرو می‌شود؛ در فیلد جدید image_cdn
- *        کنار همان محصول در کاتالوگ ذخیره می‌شود.
- *   ۳) سقف ۱۲ آپلود در هر چرخه عمداً محافظه‌کارانه انتخاب شده تا در کنار
- *      خزش خودِ سایت (که خودش تا ۱۹ ساب‌ریکوئست مصرف می‌کند: ۱۸ صفحه +
- *      ۱ robots.txt)، مجموع از سقف ۵۰ ساب‌ریکوئست رایگان هر اجرای Worker
- *      رد نشود (۱۹ + ۱۲×۲ = ۴۳، هنوز زیر ۵۰). برای فروشگاه‌های بزرگ،
- *      عکس‌ها به‌تدریج، ساعت به ساعت، کامل می‌شوند — نه همه یک‌جا.
+ * ‼️ بخش ۳ - جدید (استخراج OCR در زمان ایندکس):
+ * در همان چرخه‌ی ساعتی self-refresh، بعد از این‌که بخش ۲ آدرس CDN عکس
+ * را ساخت، یک مرحله‌ی اضافی جدید اجرا می‌شود:
+ *   ۱) اگر فروشنده هنوز کلید Gemini خودش را وارد نکرده (یعنی
+ *      env.CATALOG_KV کلید ocr-config را ندارد)، این مرحله کاملاً رد
+ *      می‌شود — هیچ رفتاری نسبت به قبل از این تغییر عوض نمی‌شود.
+ *   ۲) اگر انجام داده باشد، فقط برای محصولاتی که از قبل یک image_cdn
+ *      دارند (یعنی عکسشان از قبل با موفقیت در مخزن خودِ فروشنده کش شده)
+ *      این مرحله اجرا می‌شود — هرگز مستقیم از سایت اصلی فروشنده عکس
+ *      خوانده نمی‌شود، همیشه از همان آدرس CDN خودِ فروشنده.
+ *      - اگر همان image_cdn در چرخه‌ی قبلی قبلاً یک‌بار OCR شده بود
+ *        (یعنی در کاتالوگ ذخیره‌شده‌ی قبلی یک ocr_text برایش ثبت شده،
+ *        حتی رشته‌ی خالی)، همان مقدار قبلی دوباره استفاده می‌شود — هیچ
+ *        فراخوانی تکراری به Gemini اتفاق نمی‌افتد.
+ *      - در غیر این صورت، اگر هنوز به سقف ۳ استخراج-جدید-در-این-چرخه
+ *        نرسیده باشیم، عکس یک‌بار از CDN خودِ فروشنده دانلود و به
+ *        Gemini (همان مدل چندوجهی‌ای که app.js استفاده می‌کند) داده
+ *        می‌شود تا هر متن ریزی که روی عکس هست دقیق استخراج شود؛ نتیجه
+ *        در فیلد جدید ocr_text کنار همان محصول در کاتالوگ ذخیره می‌شود.
+ *   ۳) سقف ۳ استخراج در هر چرخه عمداً محافظه‌کارانه انتخاب شده تا در
+ *      کنار خزش متن (تا ۱۹ ساب‌ریکوئست) و آپلود عکس (تا ۲۴ ساب‌ریکوئست)،
+ *      مجموع از سقف ۵۰ ساب‌ریکوئست رایگان هر اجرای Worker رد نشود
+ *      (۱۹ + ۲۴ + ۳×۲ = ۴۹، هنوز زیر ۵۰). برای فروشگاه‌های بزرگ، متن
+ *      OCR عکس‌ها به‌تدریج، ساعت به ساعت، کامل می‌شود — نه همه یک‌جا.
  *   ۴) هر خطا در این مرحله (چه در یک عکس خاص، چه در کل مرحله) کاملاً
- *      بی‌سروصدا بلعیده می‌شود؛ کاتالوگ متنی همیشه ذخیره می‌شود، حتی اگر
- *      آپلود عکس‌ها آن ساعت به هر دلیلی شکست بخورد.
+ *      بی‌سروصدا بلعیده می‌شود؛ کاتالوگ متنی و عکس‌ها همیشه ذخیره
+ *      می‌شوند، حتی اگر OCR آن ساعت به هر دلیلی شکست بخورد.
+ *   ۵) یک بخش تازه در صفحه‌ی landing («۳) اتصال کلید OCR») اضافه شده
+ *      تا فروشنده بتواند یک کلید رایگان Gemini API (بدون کارت بانکی)
+ *      را وارد و تست کند — دقیقاً هم‌الگو با بخش «اتصال انبار عکس»ی که
+ *      از قبل وجود داشت.
  *
- * هیچ منطق دیگری (fetch handler، مسیرهای /، /internal-token، /setup،
- * /update، /catalog، /save-image-config، /image-config-status، صفحه‌ی
- * landing، دکمه‌ی «اتصال خودکار»، Cron Trigger) تغییر نکرده است.
+ * هیچ منطق دیگری (fetch handler قبلی، مسیرهای /، /internal-token،
+ * /setup، /update، /catalog، /save-image-config، /image-config-status،
+ * دکمه‌ی «اتصال خودکار»، Cron Trigger، بخش ۱ و بخش ۲) تغییر نکرده است.
  */
 
 const CATALOG_KEY = "catalog";
 const TOKEN_KEY = "update-token";
 const IMAGE_CONFIG_KEY = "image-config";
+const OCR_CONFIG_KEY = "ocr-config"; // ‼️ جدید — بخش ۳
 
 // ‼️ آدرس سرور مرکزی — همانی که در سایت ما (worker.js اصلی) هست.
 const CENTRAL_SERVER_URL = "https://shop-assistant.laana9258.workers.dev";
@@ -63,11 +65,19 @@ const GITHUB_API_BASE = "https://api.github.com";
 const GITHUB_API_UA = "AI-Shop-Assistant-ImageStore/1.0";
 const GITHUB_VALIDATE_TIMEOUT_MS = 10000;
 
-// ‼️ بخش ۲ - جدید — تنظیمات مخصوص خزش و آپلود عکس
+// ‼️ بخش ۲ — تنظیمات مخصوص خزش و آپلود عکس
 const IMAGE_UPLOAD_MAX_BYTES = 6 * 1024 * 1024; // بیش از ۶ مگابایت، آن عکس رد می‌شود
 const IMAGE_UPLOAD_MAX_PER_CYCLE = 12; // سقف آپلود «جدید» در هر اجرای ساعتی
 const IMAGE_UPLOAD_FETCH_TIMEOUT_MS = 10000;
 const GITHUB_UPLOAD_TIMEOUT_MS = 10000;
+
+// ‼️ بخش ۳ - جدید — تنظیمات مخصوص استخراج OCR
+const OCR_GEMINI_MODEL = "gemini-3.1-flash-lite"; // همان مدلی که app.js برای چت هم استفاده می‌کند
+const OCR_GEMINI_TIMEOUT_MS = 12000;
+const OCR_IMAGE_FETCH_TIMEOUT_MS = 10000;
+const OCR_MAX_PER_CYCLE = 3; // سقف استخراج «جدید» در هر اجرای ساعتی
+const OCR_MAX_TEXT_CHARS = 2000; // سقف طول متن ذخیره‌شده برای هر محصول، تا حجم KV زیاد نشود
+const OCR_EMPTY_MARKER = "(بدون متن)";
 
 function json(data, status, extraHeaders) {
   var headers = {
@@ -233,7 +243,113 @@ async function handleImageConfigStatus(env) {
 // پایان بخش ۱
 // ══════════════════════════════════════════════════════════════════════
 
-// ‼️ صفحه‌ی landing — دقیقاً همان نسخه‌ی بخش ۱، بدون هیچ تغییری.
+// ══════════════════════════════════════════════════════════════════════
+// ‼️ بخش ۳ - جدید — کمکی‌های مستقل برای پیکربندی کلید Gemini (OCR)
+// ══════════════════════════════════════════════════════════════════════
+
+// یک تماس بسیار کوچک و ارزان با Gemini می‌زند فقط برای اینکه مطمئن شود
+// کلید معتبر است؛ هیچ عکسی اینجا رد و بدل نمی‌شود.
+async function validateGeminiKey(apiKey) {
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function () {
+    controller.abort();
+  }, GITHUB_VALIDATE_TIMEOUT_MS);
+
+  try {
+    var endpoint =
+      "https://generativelanguage.googleapis.com/v1beta/models/" +
+      OCR_GEMINI_MODEL +
+      ":generateContent?key=" +
+      encodeURIComponent(apiKey);
+
+    var res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "فقط یک کلمه به فارسی بنویس: تست" }] }],
+        generationConfig: { maxOutputTokens: 8 },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (res.status === 400) {
+      return { ok: false, error: "کلید Gemini نامعتبر است. مطمئن شوید آن را کامل و درست کپی کرده‌اید." };
+    }
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, error: "این کلید اجازه‌ی دسترسی ندارد. یک کلید تازه از Google AI Studio بسازید." };
+    }
+    if (res.status === 429) {
+      return { ok: false, error: "سهمیه‌ی رایگان این کلید موقتاً پر شده؛ چند دقیقه دیگر دوباره تلاش کنید." };
+    }
+    if (!res.ok) {
+      return { ok: false, error: "سرویس Gemini پاسخ غیرمنتظره‌ای داد (HTTP " + res.status + ")." };
+    }
+
+    return { ok: true };
+  } catch (e) {
+    clearTimeout(timeoutId);
+    return { ok: false, error: "اتصال به سرویس Gemini برقرار نشد. اتصال اینترنت را بررسی کنید و دوباره تلاش کنید." };
+  }
+}
+
+async function handleSaveOcrConfig(request, env) {
+  var body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return json({ error: "بدنه‌ی درخواست نامعتبر است" }, 400);
+  }
+  if (!body || !body.geminiApiKey) {
+    return json({ error: "کلید Gemini لازم است" }, 400);
+  }
+
+  var apiKey = String(body.geminiApiKey).trim();
+  if (!apiKey) {
+    return json({ error: "کلید نمی‌تواند خالی باشد" }, 400);
+  }
+
+  var validation = await validateGeminiKey(apiKey);
+  if (!validation.ok) {
+    return json({ error: validation.error }, 400);
+  }
+
+  await env.CATALOG_KV.put(
+    OCR_CONFIG_KEY,
+    JSON.stringify({
+      geminiApiKey: apiKey,
+      savedAt: Date.now(),
+    })
+  );
+
+  return json({
+    ok: true,
+    message: "کلید OCR با موفقیت متصل و تأیید شد.",
+  });
+}
+
+async function handleOcrConfigStatus(env) {
+  var raw = await env.CATALOG_KV.get(OCR_CONFIG_KEY);
+  if (!raw) {
+    return json({ configured: false });
+  }
+  var cfg;
+  try {
+    cfg = JSON.parse(raw);
+  } catch (e) {
+    return json({ configured: false });
+  }
+  return json({
+    configured: true,
+    savedAt: cfg.savedAt || null,
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// پایان کمکی‌های پیکربندی بخش ۳
+// ══════════════════════════════════════════════════════════════════════
+
+// ‼️ صفحه‌ی landing — همان نسخه‌ی قبلی + یک کارت جدید برای اتصال کلید OCR.
 function landingPageHtml() {
   return (
     "<!DOCTYPE html>" +
@@ -242,7 +358,7 @@ function landingPageHtml() {
     "<title>اتصال انبار فروشگاه</title>" +
     "<style>" +
     "body{font-family:Tahoma,Vazirmatn,sans-serif;background:#FAF6ED;margin:0;padding:24px;" +
-    "display:flex;align-items:center;justify-content:center;min-height:100vh;box-sizing:border-box;}" +
+    "display:flex;align-items:center;justify-content:center;min-height:100vh;box-sizing:border-box;flex-direction:column;}" +
     ".card{background:#fff;border-radius:16px;padding:28px 22px;max-width:420px;width:100%;" +
     "box-shadow:0 10px 30px rgba(0,0,0,.08);text-align:center;margin-bottom:18px;}" +
     "h1{font-size:19px;color:#0A3838;margin:0 0 10px;}" +
@@ -263,6 +379,7 @@ function landingPageHtml() {
     "button:disabled{opacity:.5;}" +
     "#msg{margin-top:16px;font-size:13.5px;min-height:20px;}" +
     "#imgMsg{margin-top:16px;font-size:13.5px;min-height:20px;text-align:right;}" +
+    "#ocrMsg{margin-top:16px;font-size:13.5px;min-height:20px;text-align:right;}" +
     ".ok{color:#1f5c3a;} .err{color:#8a4b1c;}" +
     ".field-label{display:block;text-align:right;font-size:12.5px;font-weight:700;color:#0A3838;margin:0 0 6px;}" +
     ".help-box{text-align:right;background:#F1EEE4;border-radius:10px;padding:14px 16px;margin-top:14px;" +
@@ -312,6 +429,29 @@ function landingPageHtml() {
     "</ol>" +
     "</div>" +
     '<div id="imgMsg"></div>' +
+    "</div>" +
+
+    '<div class="card" style="text-align:right;">' +
+    "<h2 style=\"text-align:center;\">🔎 ۳) اتصال کلید خواندن متن روی عکس (OCR)</h2>" +
+    '<div id="ocrStatusPill" class="status-pill off" style="display:block;text-align:center;">در حال بررسی وضعیت...</div>' +
+    "<p>این بخش باعث می‌شود دستیار بتواند نوشته‌های ریز روی عکس محصولات (مثلاً برچسب یک کرم آرایشی) را هم بخواند. کاملاً رایگان است و به هیچ کارت بانکی نیاز ندارد.</p>" +
+    '<label class="field-label">کلید Gemini API</label>' +
+    '<input id="geminiKeyInput" class="wide" type="password" placeholder="AIza...">' +
+    '<button id="saveOcrConfigBtn" class="secondary" onclick="saveOcrConfig()">💾 ذخیره و تست اتصال</button>' +
+    '<button type="button" class="fallback-toggle" onclick="toggleOcrHelp()" style="display:block;margin:10px auto 0;">نمی‌دانم این کلید چیست و از کجا بسازم؟</button>' +
+    '<div id="ocrHelpBox" class="help-box" style="display:none;">' +
+    "<b>این کلید فقط اجازه می‌دهد ابزار ما یک سرویس رایگان گوگل به اسم Gemini را صدا بزند تا متن روی عکس‌ها را بخواند؛ به هیچ چیز دیگری در حساب گوگل شما دسترسی ندارد.</b>" +
+    "<ol>" +
+    "<li>در مرورگر گوشی‌تان به آدرس <b>aistudio.google.com</b> بروید.</li>" +
+    "<li>با هر حساب Gmail که دارید وارد شوید (نیازی به حساب جدید نیست).</li>" +
+    "<li>روی گزینه‌ای شبیه «Get API key» یا «دریافت کلید API» بزنید (معمولاً گوشه‌ی بالا یا سمت چپ صفحه است).</li>" +
+    "<li>روی «Create API key» بزنید. اگر از شما پرسید در کدام پروژه ساخته شود، همان گزینه‌ی پیش‌فرض را بزنید.</li>" +
+    "<li>یک متن که با <b>AIza</b> شروع می‌شود ساخته می‌شود. روی آیکون کپی کنارش بزنید.</li>" +
+    "<li>به همین صفحه برگردید، آن متن کپی‌شده را در کادر «کلید Gemini API» بالا بچسبانید (لمس‌نگه‌دارید روی کادر و «Paste» را بزنید)، سپس روی «ذخیره و تست اتصال» بزنید.</li>" +
+    "<li>این کلید در همان «سطح رایگان» گوگل کار می‌کند و هیچ‌جا کارت بانکی از شما خواسته نمی‌شود؛ اگر جایی از شما کارت خواست، آن صفحه را ببندید — آن مرحله برای این کار لازم نیست.</li>" +
+    "</ol>" +
+    "</div>" +
+    '<div id="ocrMsg"></div>' +
     "</div></div>" +
     "<script>" +
     "function toggleManual(){" +
@@ -320,6 +460,10 @@ function landingPageHtml() {
     "}" +
     "function toggleImgHelp(){" +
     'var box=document.getElementById("imgHelpBox");' +
+    'box.style.display = box.style.display==="block" ? "none" : "block";' +
+    "}" +
+    "function toggleOcrHelp(){" +
+    'var box=document.getElementById("ocrHelpBox");' +
     'box.style.display = box.style.display==="block" ? "none" : "block";' +
     "}" +
     "async function claimWithCode(code){" +
@@ -424,7 +568,55 @@ function landingPageHtml() {
     "btn.disabled=false;" +
     "}" +
     "}" +
+    "async function refreshOcrStatus(){" +
+    'var pill=document.getElementById("ocrStatusPill");' +
+    "try{" +
+    'var res=await fetch("/ocr-config-status");' +
+    "var data=await res.json();" +
+    "if(data && data.configured){" +
+    'pill.className="status-pill on";' +
+    'pill.textContent="✅ متصل — خواندن متن روی عکس فعال است";' +
+    "}else{" +
+    'pill.className="status-pill off";' +
+    'pill.textContent="⏳ هنوز متصل نشده";' +
+    "}" +
+    "}catch(e){" +
+    'pill.className="status-pill off";' +
+    'pill.textContent="⏳ هنوز متصل نشده";' +
+    "}" +
+    "}" +
+    "async function saveOcrConfig(){" +
+    'var keyInput=document.getElementById("geminiKeyInput");' +
+    'var btn=document.getElementById("saveOcrConfigBtn");' +
+    'var msgEl=document.getElementById("ocrMsg");' +
+    "var apiKey=keyInput.value.trim();" +
+    "if(!apiKey){" +
+    'msgEl.className="err";msgEl.textContent="لطفاً کلید Gemini را وارد کنید.";' +
+    "return;" +
+    "}" +
+    "btn.disabled=true;" +
+    'msgEl.className="";msgEl.textContent="در حال تست اتصال به Gemini...";' +
+    "try{" +
+    'var res=await fetch("/save-ocr-config",{' +
+    'method:"POST",headers:{"Content-Type":"application/json"},' +
+    "body:JSON.stringify({geminiApiKey:apiKey})});" +
+    "var data=await res.json();" +
+    "if(!res.ok){" +
+    'msgEl.className="err";msgEl.textContent=data.error||"اتصال ناموفق بود.";' +
+    "btn.disabled=false;" +
+    "return;" +
+    "}" +
+    'msgEl.className="ok";msgEl.textContent="✅ "+data.message;' +
+    "keyInput.value=\"\";" +
+    "btn.disabled=false;" +
+    "refreshOcrStatus();" +
+    "}catch(e){" +
+    'msgEl.className="err";msgEl.textContent="اتصال به سرور برقرار نشد. اینترنت را بررسی کنید.";' +
+    "btn.disabled=false;" +
+    "}" +
+    "}" +
     "refreshImageStatus();" +
+    "refreshOcrStatus();" +
     "</script></body></html>"
   );
 }
@@ -671,14 +863,10 @@ async function selfCrawl(origin) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// ‼️ بخش ۲ - جدید — خزش و آپلود خودکار عکس‌ها به مخزن گیت‌هاب فروشنده
-// هیچ‌کدام از این توابع در جای دیگری از فایل فراخوانی نمی‌شوند مگر
-// runSelfRefreshCycle در پایین همین بخش.
+// بخش ۲ — خزش و آپلود خودکار عکس‌ها به مخزن گیت‌هاب فروشنده
+// (بدون تغییر نسبت به نسخه‌ی قبلی)
 // ══════════════════════════════════════════════════════════════════════
 
-// یک بافر باینری را به هگز SHA-256 تبدیل می‌کند (برای نام‌گذاری فایل
-// عکس بر اساس محتوای خودش، نه بر اساس آدرس یا شماره‌ی محصول — این یعنی
-// یک عکس تکراری هرگز دوباره آپلود نمی‌شود).
 async function sha256Hex(arrayBuffer) {
   var digest = await crypto.subtle.digest("SHA-256", arrayBuffer);
   var bytes = new Uint8Array(digest);
@@ -691,8 +879,6 @@ async function sha256Hex(arrayBuffer) {
   return hex;
 }
 
-// یک Uint8Array را به Base64 تبدیل می‌کند؛ به‌صورت تکه‌تکه (chunk) تا
-// برای عکس‌های بزرگ به خطای سرریز پشته (stack overflow) نخوریم.
 function uint8ToBase64(bytes) {
   var CHUNK_SIZE = 8192;
   var binary = "";
@@ -703,7 +889,6 @@ function uint8ToBase64(bytes) {
   return btoa(binary);
 }
 
-// پسوند فایل را از Content-Type پاسخ یا، در نبود آن، از خودِ آدرس عکس حدس می‌زند.
 function guessImageExtension(contentType, imageUrl) {
   var ct = String(contentType || "").toLowerCase();
   if (ct.indexOf("png") !== -1) return "png";
@@ -718,9 +903,6 @@ function guessImageExtension(contentType, imageUrl) {
   return "jpg";
 }
 
-// عکس را از آدرس اصلی‌اش (روی سایت فروشنده) دانلود می‌کند. همان
-// محافظت‌های SSRF چرخه‌ی خزش متن (خانه‌های خصوصی/داخلی ممنوع) را دارد.
-// هرگز throw نمی‌کند؛ در صورت هر مشکلی null برمی‌گرداند.
 async function downloadImageBytes(imageUrl) {
   var parsed;
   try {
@@ -758,12 +940,6 @@ async function downloadImageBytes(imageUrl) {
   }
 }
 
-// عکس را در مخزن گیت‌هاب فروشنده، در مسیر مشخص‌شده، آپلود می‌کند.
-// چون مسیر فایل بر اساس هش محتوای خودِ عکس ساخته شده، اگر گیت‌هاب با
-// HTTP 422 پاسخ دهد (یعنی «این فایل از قبل وجود دارد»)، این خودش یعنی
-// همان محتوا از قبل آنجاست — پس همان را موفق در نظر می‌گیریم، نیازی به
-// یک درخواست جداگانه برای گرفتن sha و آپدیت نیست (صرفه‌جویی در سقف
-// ساب‌ریکوئست).
 async function uploadImageToGithub(imageConfig, path, base64Content) {
   var apiUrl =
     GITHUB_API_BASE +
@@ -799,7 +975,7 @@ async function uploadImageToGithub(imageConfig, path, base64Content) {
     clearTimeout(timeoutId);
 
     if (res.status === 200 || res.status === 201) return { ok: true };
-    if (res.status === 422) return { ok: true }; // فایل با همین محتوا از قبل وجود دارد
+    if (res.status === 422) return { ok: true };
     return { ok: false };
   } catch (e) {
     clearTimeout(timeoutId);
@@ -807,9 +983,6 @@ async function uploadImageToGithub(imageConfig, path, base64Content) {
   }
 }
 
-// یک عکس را کامل دانلود+آپلود می‌کند و در صورت موفقیت، آدرس دائمی
-// jsDelivr آن را برمی‌گرداند. در هر مرحله‌ای مشکلی پیش بیاید، null
-// برمی‌گرداند تا فراخواننده بدون توقف کل چرخه ادامه دهد.
 async function uploadOneImageAndGetCdnUrl(imageConfig, imageUrl) {
   var downloaded = await downloadImageBytes(imageUrl);
   if (!downloaded) return null;
@@ -847,9 +1020,6 @@ async function uploadOneImageAndGetCdnUrl(imageConfig, imageUrl) {
   );
 }
 
-// برای کل آرایه‌ی محصولات این چرخه، فیلد image_cdn را (در صورت امکان)
-// پر می‌کند. اگر فروشنده هنوز بخش ۱ را انجام نداده، بدون هیچ کاری
-// همان products را برمی‌گرداند (رفتار قبلی، دست‌نخورده).
 async function attachImageCdnUrls(env, products, previousProducts) {
   var imageConfigRaw;
   try {
@@ -869,9 +1039,6 @@ async function attachImageCdnUrls(env, products, previousProducts) {
     return products;
   }
 
-  // نگاشت «آدرس اصلی عکس روی سایت فروشنده → آدرس CDN که قبلاً برایش
-  // آپلود شده» را از کاتالوگ چرخه‌ی قبلی می‌سازیم تا از دانلود/آپلود
-  // تکراری همان عکس جلوگیری شود.
   var previousMap = {};
   if (Array.isArray(previousProducts)) {
     for (var i = 0; i < previousProducts.length; i++) {
@@ -895,7 +1062,6 @@ async function attachImageCdnUrls(env, products, previousProducts) {
     }
 
     if (uploadsUsedThisCycle >= IMAGE_UPLOAD_MAX_PER_CYCLE) {
-      // به سقف این چرخه رسیدیم؛ این محصول در چرخه‌ی ساعتی بعدی امتحان می‌شود
       continue;
     }
 
@@ -905,9 +1071,7 @@ async function attachImageCdnUrls(env, products, previousProducts) {
       if (cdnUrl) {
         product.image_cdn = cdnUrl;
       }
-    } catch (perImageErr) {
-      // این یک عکس شکست خورد؛ بقیه‌ی چرخه بدون وقفه ادامه پیدا می‌کند
-    }
+    } catch (perImageErr) {}
   }
 
   return products;
@@ -915,6 +1079,198 @@ async function attachImageCdnUrls(env, products, previousProducts) {
 
 // ══════════════════════════════════════════════════════════════════════
 // پایان بخش ۲
+// ══════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════════
+// ‼️ بخش ۳ - جدید — استخراج OCR در زمان ایندکس
+// هیچ‌کدام از این توابع در جای دیگری از فایل فراخوانی نمی‌شوند مگر
+// runSelfRefreshCycle در پایین همین بخش، و فقط بعد از بخش ۲.
+// ══════════════════════════════════════════════════════════════════════
+
+// عکس را از آدرس CDN خودِ فروشنده (نه از سایت اصلی فروشنده) می‌خواند و
+// از Gemini چندوجهی می‌خواهد هر متن ریزی روی آن هست را دقیق استخراج
+// کند. هرگز throw نمی‌کند؛ در هر مشکلی رشته‌ی خالی برمی‌گرداند تا
+// فراخواننده بدون توقف کل چرخه ادامه دهد.
+async function extractOcrTextFromImage(geminiApiKey, imageCdnUrl) {
+  var imgController = new AbortController();
+  var imgTimeoutId = setTimeout(function () {
+    imgController.abort();
+  }, OCR_IMAGE_FETCH_TIMEOUT_MS);
+
+  var imageRes;
+  try {
+    imageRes = await fetch(imageCdnUrl, {
+      headers: { Accept: "image/*" },
+      signal: imgController.signal,
+      cf: { cacheTtl: 0 },
+    });
+  } catch (e) {
+    clearTimeout(imgTimeoutId);
+    return "";
+  }
+  clearTimeout(imgTimeoutId);
+  if (!imageRes || !imageRes.ok) return "";
+
+  var contentType = imageRes.headers.get("content-type") || "image/jpeg";
+  var buffer;
+  try {
+    buffer = await imageRes.arrayBuffer();
+  } catch (e) {
+    return "";
+  }
+  if (!buffer || buffer.byteLength === 0 || buffer.byteLength > IMAGE_UPLOAD_MAX_BYTES) return "";
+
+  var base64Data;
+  try {
+    base64Data = uint8ToBase64(new Uint8Array(buffer));
+  } catch (e) {
+    return "";
+  }
+
+  var endpoint =
+    "https://generativelanguage.googleapis.com/v1beta/models/" +
+    OCR_GEMINI_MODEL +
+    ":generateContent?key=" +
+    encodeURIComponent(geminiApiKey);
+
+  var body = {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            text:
+              "تمام متن‌ها و نوشته‌های ریزی که روی این تصویر محصول دیده می‌شوند را دقیقاً همان‌طور که نوشته شده‌اند، کلمه‌به‌کلمه استخراج کن. " +
+              "اگر روی تصویر هیچ متنی وجود ندارد، فقط دقیقاً همین عبارت را بنویس: " +
+              OCR_EMPTY_MARKER +
+              ". هیچ توضیح اضافه‌ای، مقدمه، یا جمله‌ی دیگری ننویس؛ فقط خودِ متن استخراج‌شده (یا آن عبارت) را برگردان.",
+          },
+          { inlineData: { mimeType: contentType, data: base64Data } },
+        ],
+      },
+    ],
+    generationConfig: { temperature: 0, maxOutputTokens: 512 },
+  };
+
+  var apiController = new AbortController();
+  var apiTimeoutId = setTimeout(function () {
+    apiController.abort();
+  }, OCR_GEMINI_TIMEOUT_MS);
+
+  var res;
+  try {
+    res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: apiController.signal,
+    });
+  } catch (e) {
+    clearTimeout(apiTimeoutId);
+    return "";
+  }
+  clearTimeout(apiTimeoutId);
+  if (!res.ok) return "";
+
+  var data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    return "";
+  }
+
+  var candidate = data.candidates && data.candidates[0];
+  var textParts =
+    (candidate &&
+      candidate.content &&
+      candidate.content.parts &&
+      candidate.content.parts
+        .filter(function (p) {
+          return !!p.text;
+        })
+        .map(function (p) {
+          return p.text;
+        })) ||
+    [];
+
+  var joined = textParts.join("\n").trim();
+  if (!joined || joined === OCR_EMPTY_MARKER) return "";
+  if (joined.length > OCR_MAX_TEXT_CHARS) {
+    joined = joined.slice(0, OCR_MAX_TEXT_CHARS);
+  }
+  return joined;
+}
+
+// برای کل آرایه‌ی محصولات این چرخه، فیلد ocr_text را (در صورت امکان)
+// پر می‌کند. اگر فروشنده هنوز کلید Gemini را وارد نکرده، بدون هیچ
+// کاری همان products را برمی‌گرداند (رفتار قبلی، دست‌نخورده).
+async function attachOcrText(env, products, previousProducts) {
+  var ocrConfigRaw;
+  try {
+    ocrConfigRaw = await env.CATALOG_KV.get(OCR_CONFIG_KEY);
+  } catch (e) {
+    return products;
+  }
+  if (!ocrConfigRaw) return products;
+
+  var ocrConfig;
+  try {
+    ocrConfig = JSON.parse(ocrConfigRaw);
+  } catch (e) {
+    return products;
+  }
+  if (!ocrConfig || !ocrConfig.geminiApiKey) return products;
+
+  // نگاشت «آدرس CDN عکس → متن OCR که قبلاً برایش استخراج شده» را از
+  // کاتالوگ چرخه‌ی قبلی می‌سازیم تا از فراخوانی تکراری Gemini برای
+  // همان عکس جلوگیری شود. مقدار خالی هم یک نتیجه‌ی معتبر است (یعنی آن
+  // عکس متنی ندارد) و باید حفظ شود، نه دوباره امتحان شود.
+  var previousMap = {};
+  if (Array.isArray(previousProducts)) {
+    for (var i = 0; i < previousProducts.length; i++) {
+      var prev = previousProducts[i];
+      if (prev && prev.image_cdn && typeof prev.ocr_text === "string") {
+        previousMap[prev.image_cdn] = prev.ocr_text;
+      }
+    }
+  }
+
+  var ocrUsedThisCycle = 0;
+
+  for (var j = 0; j < products.length; j++) {
+    var product = products[j];
+
+    // فقط عکس‌هایی که از قبل در CDN خودِ فروشنده کش شده‌اند بررسی
+    // می‌شوند — این یعنی هیچ‌وقت مستقیم به سایت اصلی فروشنده برای OCR
+    // درخواستی زده نمی‌شود.
+    if (!product || !product.image_cdn) continue;
+
+    var existingOcr = previousMap[product.image_cdn];
+    if (typeof existingOcr === "string") {
+      product.ocr_text = existingOcr;
+      continue;
+    }
+
+    if (ocrUsedThisCycle >= OCR_MAX_PER_CYCLE) {
+      // به سقف این چرخه رسیدیم؛ این محصول در چرخه‌ی ساعتی بعدی امتحان می‌شود
+      continue;
+    }
+
+    ocrUsedThisCycle++;
+    try {
+      var extractedText = await extractOcrTextFromImage(ocrConfig.geminiApiKey, product.image_cdn);
+      product.ocr_text = extractedText;
+    } catch (perImageErr) {
+      // این یک عکس شکست خورد؛ بقیه‌ی چرخه بدون وقفه ادامه پیدا می‌کند.
+      // فیلد ocr_text عمداً ست نمی‌شود تا چرخه‌ی بعدی دوباره امتحان کند.
+    }
+  }
+
+  return products;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// پایان بخش ۳
 // ══════════════════════════════════════════════════════════════════════
 
 async function runSelfRefreshCycle(env) {
@@ -948,14 +1304,20 @@ async function runSelfRefreshCycle(env) {
 
     if (!products || !products.length) return;
 
-    // ‼️ بخش ۲ - جدید — تلاش برای پر کردن image_cdn روی محصولات این
-    // چرخه. هر خطای پیش‌بینی‌نشده در کل این مرحله بی‌سروصدا بلعیده
-    // می‌شود؛ کاتالوگ متنی زیر، در هر صورت (حتی اگر آپلود عکس شکست
-    // بخورد)، ذخیره می‌شود.
+    // بخش ۲ — تلاش برای پر کردن image_cdn روی محصولات این چرخه.
     try {
       products = await attachImageCdnUrls(env, products, current && current.products);
     } catch (imageStageErr) {
       // نادیده گرفته می‌شود؛ ادامه با همان products بدون image_cdn
+    }
+
+    // ‼️ بخش ۳ - جدید — تلاش برای پر کردن ocr_text روی محصولاتی که
+    // image_cdn دارند. هر خطای پیش‌بینی‌نشده در کل این مرحله بی‌سروصدا
+    // بلعیده می‌شود؛ کاتالوگ و عکس‌های بخش ۲، در هر صورت، ذخیره می‌شوند.
+    try {
+      products = await attachOcrText(env, products, current && current.products);
+    } catch (ocrStageErr) {
+      // نادیده گرفته می‌شود؛ ادامه با همان products بدون ocr_text
     }
 
     await env.CATALOG_KV.put(
@@ -1050,6 +1412,14 @@ export default {
     }
     if (url.pathname === "/image-config-status" && request.method === "GET") {
       return handleImageConfigStatus(env);
+    }
+
+    // ‼️ بخش ۳ - جدید — مسیرهای پیکربندی کلید OCR
+    if (url.pathname === "/save-ocr-config" && request.method === "POST") {
+      return handleSaveOcrConfig(request, env);
+    }
+    if (url.pathname === "/ocr-config-status" && request.method === "GET") {
+      return handleOcrConfigStatus(env);
     }
 
     return json({ error: "مسیر یافت نشد" }, 404);
