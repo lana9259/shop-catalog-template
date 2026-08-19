@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "deploy": "wrangler d1 migrations apply CATALOG_DB --remote && wrangler deploy"
+  },
   "devDependencies": {
     "wrangler": "^3.90.0"
   }
