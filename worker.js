@@ -1,37 +1,48 @@
 /**
  * worker.js — این فایل روی حساب شخصی خودِ فروشنده اجرا می‌شود، نه حساب من.
  *
- * ‼️ این نسخه، بخش‌های ۲ و ۳ و ۴ معماری فدرال را پیاده می‌کند:
+ * ‼️ این نسخه، بخش ۵ معماری فدرال را پیاده می‌کند (سخت‌سازی پروکسی /img):
  *
- *  بخش ۲ — بازنویسی کامل خزش (runSelfRefreshCycle و توابع کمکی‌اش):
- *    به‌جای نوشتن حداکثر ۲۰۰ محصول در KV، حالا محصولات به‌صورت صفحه‌بندی‌شده
- *    و ازسرگیری‌پذیر (resumable) مستقیماً در جدول products دیتابیس D1
- *    نوشته می‌شوند. وضعیتِ ازسرگیری (کدام sitemap، کدام آفست) در جدول
- *    crawl_state نگه داشته می‌شود؛ هر بار که چرخه‌ی ساعتی اجرا شود، دقیقاً
- *    از همان‌جایی که دفعه‌ی قبل متوقف شده بود ادامه می‌دهد.
+ *  بخش ۵ — اعتبارسنجی ETag/Last-Modified به‌جای کش کور یک‌ساله +
+ *  نرمال‌سازی کلید کش:
+ *    - سقف کش از یک سال به یک روز کاهش پیدا کرده و "immutable" برداشته شده.
+ *    - قبل از هر دانلود کامل، اگر ETag/Last-Modified قبلیِ همان عکس را
+ *      داریم (در یک رکورد بسیار کوچک در KV، نه خودِ عکس)، یک درخواست
+ *      اعتبارسنجی‌شده (conditional) به سایت فروشنده زده می‌شود. اگر سایت
+ *      فروشنده بگوید عکس عوض نشده (۳۰۴)، فقط بایت‌ها را دوباره (بدون هدر
+ *      شرطی) می‌گیریم چون کپیِ کش لبه منقضی شده؛ ولی متن OCR قبلی دست‌نخورده
+ *      می‌ماند. اگر ETag/Last-Modified با نسخه‌ی قبلی فرق داشت، یعنی عکس
+ *      واقعاً روی همان آدرس عوض شده — در این حالت متن OCR قدیمیِ همان عکس
+ *      حذف می‌شود تا در اولین دیدن بعدی، دوباره و روی عکس تازه محاسبه شود.
+ *    - قبل از ساخت کلید کش، پارامترهای رایج ضدکش در آدرس عکس (مثل ?v=2،
+ *      ?cache=123، ?t=...) حذف می‌شوند تا همان یک عکس با چند شکل مختلف
+ *      URL، فقط یک بار در کش لبه جا بگیرد.
  *
- *  بخش ۳ — /catalog (خواندن از D1) + /search جدید (FTS5 روی D1):
- *
- *  بخش ۴ — لایه‌ی جست‌وجوی معنایی Vectorize:
- *    بردار هر محصول (عنوان + متن OCR) به‌صورت تدریجی در scheduled() ساخته
- *    و در Vectorize ذخیره می‌شود. /search اول از Vectorize استفاده می‌کند؛
- *    اگر Vectorize بایند نشده باشد یا جواب نداد، خودکار و بی‌صدا به همان
- *    جست‌وجوی کلمه‌ای FTS5 سقوط می‌کند — هرگز خطا نمی‌دهد.
- *    ‼️ چون Cloudflare راهی برای ساخت خودکار Vectorize (شبیه KV/D1) ندارد،
- *    یک مسیر جدید /setup-vectorize و یک کارت تازه در صفحه‌ی landing اضافه
- *    شده که با یک توکن API (نه خط‌فرمان)، ایندکس Vectorize را برای شما
- *    می‌سازد. تا وقتی این مرحله را انجام ندهید، همه‌چیز دقیقاً مثل قبل
- *    (فقط با FTS5) کار می‌کند — هیچ‌چیز خراب نمی‌شود.
- *
- * هیچ منطق دیگری (مسیرهای /، /internal-token، /setup، /update، پروکسی
- * /img، OCR تنبل، دکمه‌ی «اتصال خودکار») تغییر نکرده است.
+ * هیچ منطق دیگری (خزش D1، /catalog، /search، Vectorize، مسیرهای /setup،
+ * /internal-token، /update، صفحه‌ی landing، دکمه‌ی «اتصال خودکار») تغییر
+ * نکرده است.
  */
 
 const CATALOG_KEY = "catalog";
 const TOKEN_KEY = "update-token";
 const OCR_CONFIG_KEY = "ocr-config";
 const OCR_TEXT_PREFIX = "ocr:";
-const VECTORIZE_CONFIG_KEY = "vectorize-config"; // ‼️ جدید (بخش ۴)
+const VECTORIZE_CONFIG_KEY = "vectorize-config";
+
+// ‼️ جدید (بخش ۵) — پیشوند رکوردهای بسیار کوچکِ ETag/Last-Modified هر
+// عکس. این رکوردها فقط چند ده بایت هستند (نه خودِ عکس)، پس هیچ فشاری به
+// سقف فضا یا نوشتن KV وارد نمی‌کنند.
+const IMG_META_KV_PREFIX = "imgmeta:";
+
+// ‼️ جدید (بخش ۵) — نام پارامترهای رایج «ضدکش» که سایت‌های فروشگاهی
+// معمولاً به انتهای آدرس عکس اضافه می‌کنند بدون اینکه خودِ عکس عوض شود.
+// این پارامترها فقط از کلید کش حذف می‌شوند؛ در خودِ درخواست واقعی به
+// سایت فروشنده دست‌نخورده باقی می‌مانند (چون شاید برای برخی سایت‌ها واقعاً
+// لازم باشند).
+const IMG_CACHE_BUST_PARAM_NAMES = [
+  "v", "ver", "version", "cache", "cb", "_", "t", "ts",
+  "timestamp", "rand", "r", "nocache", "cachebust",
+];
 
 // ‼️ آدرس سرور مرکزی — همانی که در سایت ما (worker.js اصلی) هست.
 const CENTRAL_SERVER_URL = "https://shop-assistant.laana9258.workers.dev";
@@ -43,18 +54,18 @@ const SELF_REFRESH_FETCH_TIMEOUT_MS = 10000;
 const SELF_REFRESH_MAX_RESPONSE_CHARS = 900000;
 const SELF_REFRESH_MAX_PAGES = 18; // حداکثر صفحه‌ی محصول در هر یک اجرای چرخه (هر ساعت)
 const SELF_REFRESH_PRODUCT_PATH_HINTS = ["/product", "/products", "/shop/", "/item/", "/p/"];
-// ‼️ جدید (بخش ۲) — بعد از اینکه یک دور کامل خزش کل سایت تمام شد (phase=done)،
-// این‌قدر صبر می‌کنیم قبل از اینکه یک دور کامل تازه را از نو شروع کنیم؛
-// این‌طور به سایت فروشنده فشار مداوم و غیرضروری وارد نمی‌شود.
 const SELF_REFRESH_FULL_CYCLE_COOLDOWN_MS = 20 * 60 * 60 * 1000; // ۲۰ ساعت
 
 // تنظیمات مخصوص اعتبارسنجی کلید Gemini (برای کارت OCR در landing).
 const GENERIC_VALIDATE_TIMEOUT_MS = 10000;
 
-// تنظیمات مخصوص پروکسی عکس (Cache API لبه‌ای Cloudflare).
+// ‼️ تنظیمات مخصوص پروکسی عکس — بخش ۵ (Cache API لبه‌ای Cloudflare +
+// اعتبارسنجی ETag/Last-Modified).
 const IMG_PROXY_FETCH_TIMEOUT_MS = 15000;
 const IMG_MAX_BYTES = 15 * 1024 * 1024; // سقف ۱۵ مگابایت برای هر عکس؛ فقط برای جلوگیری از سوءاستفاده
-const IMG_PROXY_CACHE_SECONDS = 60 * 60 * 24 * 365; // یک سال
+// ‼️ تغییر (بخش ۵) — قبلاً ۱ سال (immutable) بود؛ حالا ۱ روز است، بدون
+// immutable، چون دیگر کورکورانه به کش قدیمی اعتماد نمی‌کنیم.
+const IMG_PROXY_CACHE_SECONDS = 60 * 60 * 24; // ۱ روز
 
 // تنظیمات مخصوص OCR تنبل (اجرا در لحظه‌ی اولین دیدن هر عکس).
 const OCR_GEMINI_MODEL = "gemini-3.1-flash-lite"; // همان مدلی که app.js برای چت هم استفاده می‌کند
@@ -65,16 +76,14 @@ const OCR_EMPTY_MARKER = "(بدون متن)";
 // کش لبه‌ای پاسخ /catalog، تا کوئری‌های D1 فشار زیادی به دیتابیس نزنند.
 const CATALOG_EDGE_CACHE_SECONDS = 180; // ۳ دقیقه
 
-// ‼️ جدید (بخش ۳) — تنظیمات مسیر /catalog (خواندن صفحه‌بندی‌شده از D1).
+// تنظیمات مسیر /catalog (خواندن صفحه‌بندی‌شده از D1).
 const CATALOG_DEFAULT_LIMIT = 5000;
 const CATALOG_MAX_LIMIT = 20000;
 
-// ‼️ جدید (بخش ۳) — تنظیمات مسیر /search (طبق معماری: حداکثر ۱۰ کاندید).
+// تنظیمات مسیر /search (طبق معماری: حداکثر ۱۰ کاندید).
 const SEARCH_MAX_CANDIDATES = 10;
 
-// ‼️ جدید (بخش ۴) — تنظیمات مدل embedding و Vectorize.
-// از همان کلید Gemini که برای OCR وصل شده استفاده می‌کنیم (کارت «۲»)؛
-// نیازی به کلید دومی نیست. مدل embedContent گوگل، بردار ۷۶۸ بعدی می‌دهد.
+// تنظیمات مدل embedding و Vectorize.
 const EMBEDDING_MODEL = "text-embedding-004";
 const EMBEDDING_DIMENSIONS = 768;
 const EMBEDDING_TIMEOUT_MS = 12000;
@@ -265,7 +274,7 @@ async function handleOcrConfigStatus(env) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// پروکسی عکس با کش لبه‌ای Cloudflare + OCR تنبل — بدون تغییر
+// پروکسی عکس با کش لبه‌ای Cloudflare + OCR تنبل — بخش ۵ (سخت‌سازی)
 // ══════════════════════════════════════════════════════════════════════
 
 async function extractOcrTextFromImageBytes(geminiApiKey, base64Data, contentType) {
@@ -374,6 +383,45 @@ async function maybeRunLazyOcr(env, imageUrl, buffer, contentType) {
   }
 }
 
+// ‼️ جدید (بخش ۵) — پارامترهای رایج ضدکش را از آدرس عکس حذف می‌کند و
+// باقی‌مانده را برای پایداری کلید کش مرتب می‌کند. این فقط برای «ساخت
+// کلید کش» استفاده می‌شود؛ خودِ درخواست واقعی به سایت فروشنده همیشه با
+// آدرس اصلی و کامل (بدون حذف هیچ پارامتری) انجام می‌شود.
+function buildNormalizedCacheKeyUrl(targetUrl, workerOrigin) {
+  var cleaned;
+  try {
+    cleaned = new URL(targetUrl.toString());
+  } catch (e) {
+    return workerOrigin + "/img?u=" + encodeURIComponent(targetUrl.toString());
+  }
+
+  var namesToDelete = [];
+  cleaned.searchParams.forEach(function (_value, key) {
+    if (IMG_CACHE_BUST_PARAM_NAMES.indexOf(key.toLowerCase()) !== -1) {
+      namesToDelete.push(key);
+    }
+  });
+  namesToDelete.forEach(function (key) {
+    cleaned.searchParams.delete(key);
+  });
+
+  var remainingParams = [];
+  cleaned.searchParams.forEach(function (value, key) {
+    remainingParams.push([key, value]);
+  });
+  remainingParams.sort(function (a, b) {
+    if (a[0] < b[0]) return -1;
+    if (a[0] > b[0]) return 1;
+    return 0;
+  });
+  cleaned.search = "";
+  remainingParams.forEach(function (pair) {
+    cleaned.searchParams.append(pair[0], pair[1]);
+  });
+
+  return workerOrigin + "/img?u=" + encodeURIComponent(cleaned.toString());
+}
+
 async function handleImageProxy(request, env, ctx) {
   var url = new URL(request.url);
   var rawTarget = url.searchParams.get("u");
@@ -395,11 +443,34 @@ async function handleImageProxy(request, env, ctx) {
   }
 
   var cache = caches.default;
-  var cacheKey = new Request(url.toString(), { method: "GET" });
+
+  // ‼️ جدید (بخش ۵) — کلید کش حالا از روی آدرس نرمال‌شده (بدون پارامترهای
+  // ضدکش) ساخته می‌شود، نه از روی آدرس خام درخواست.
+  var normalizedCacheKeyUrlString = buildNormalizedCacheKeyUrl(targetUrl, url.origin);
+  var cacheKey = new Request(normalizedCacheKeyUrlString, { method: "GET" });
 
   var cachedResponse = await cache.match(cacheKey);
   if (cachedResponse) {
     return cachedResponse;
+  }
+
+  // ‼️ جدید (بخش ۵) — قبل از دانلود کامل، ببین آیا ETag/Last-Modified قبلیِ
+  // همین عکس را داریم (یک رکورد چند ده‌بایتی در KV، نه خودِ عکس).
+  var metaKey = IMG_META_KV_PREFIX + (await sha256HexFromString(targetUrl.toString()));
+  var previousMeta = null;
+  try {
+    var metaRaw = await env.CATALOG_KV.get(metaKey);
+    if (metaRaw) previousMeta = JSON.parse(metaRaw);
+  } catch (e) {
+    previousMeta = null;
+  }
+
+  var conditionalHeaders = { "User-Agent": SELF_REFRESH_BOT_UA, Accept: "image/*" };
+  if (previousMeta && previousMeta.etag) {
+    conditionalHeaders["If-None-Match"] = previousMeta.etag;
+  }
+  if (previousMeta && previousMeta.lastModified) {
+    conditionalHeaders["If-Modified-Since"] = previousMeta.lastModified;
   }
 
   var controller = new AbortController();
@@ -410,7 +481,7 @@ async function handleImageProxy(request, env, ctx) {
   var upstream;
   try {
     upstream = await fetch(targetUrl.toString(), {
-      headers: { "User-Agent": SELF_REFRESH_BOT_UA, Accept: "image/*" },
+      headers: conditionalHeaders,
       redirect: "follow",
       signal: controller.signal,
       cf: { cacheTtl: 0 },
@@ -420,6 +491,42 @@ async function handleImageProxy(request, env, ctx) {
     return json({ error: "دریافت عکس از سایت فروشنده ناموفق بود" }, 502);
   }
   clearTimeout(timeoutId);
+
+  var imageChangedAtOrigin = false;
+
+  if (upstream.status === 304 && previousMeta) {
+    // ‼️ عکس در سایت فروشنده عوض نشده. کپیِ کش لبه‌ی ما منقضی شده بود
+    // (وگرنه اصلاً به این‌جا نمی‌رسیدیم)، پس باید یک‌بار دیگر، این‌بار
+    // بدون هدر شرطی، بایت‌های واقعی را بگیریم. متن OCR قبلی دست‌نخورده
+    // می‌ماند چون خودِ عکس تغییری نکرده.
+    var controller2 = new AbortController();
+    var timeoutId2 = setTimeout(function () {
+      controller2.abort();
+    }, IMG_PROXY_FETCH_TIMEOUT_MS);
+    try {
+      upstream = await fetch(targetUrl.toString(), {
+        headers: { "User-Agent": SELF_REFRESH_BOT_UA, Accept: "image/*" },
+        redirect: "follow",
+        signal: controller2.signal,
+        cf: { cacheTtl: 0 },
+      });
+    } catch (e) {
+      clearTimeout(timeoutId2);
+      return json({ error: "دریافت عکس از سایت فروشنده ناموفق بود" }, 502);
+    }
+    clearTimeout(timeoutId2);
+  } else if (upstream.ok && previousMeta) {
+    // ‼️ اگر ETag/Last-Modified تازه با نسخه‌ی قبلی فرق دارد، یعنی عکس
+    // واقعاً روی همان آدرس عوض شده — بعداً باید OCR قدیمی‌اش را باطل کنیم.
+    var newEtagCheck = upstream.headers.get("etag") || null;
+    var newLastModifiedCheck = upstream.headers.get("last-modified") || null;
+    var etagDiffers = previousMeta.etag && newEtagCheck && previousMeta.etag !== newEtagCheck;
+    var lastModDiffers =
+      previousMeta.lastModified && newLastModifiedCheck && previousMeta.lastModified !== newLastModifiedCheck;
+    if (etagDiffers || lastModDiffers) {
+      imageChangedAtOrigin = true;
+    }
+  }
 
   if (!upstream.ok) {
     return json({ error: "سایت فروشنده این عکس را برنگرداند (HTTP " + upstream.status + ")" }, 502);
@@ -452,33 +559,55 @@ async function handleImageProxy(request, env, ctx) {
     status: 200,
     headers: {
       "Content-Type": contentType,
-      "Cache-Control": "public, max-age=" + IMG_PROXY_CACHE_SECONDS + ", immutable",
+      // ‼️ تغییر (بخش ۵) — دیگر "immutable" و یک‌سال نیست؛ یک روز، با
+      // اعتبارسنجی ETag/Last-Modified در پس‌زمینه.
+      "Cache-Control": "public, max-age=" + IMG_PROXY_CACHE_SECONDS,
       "Access-Control-Allow-Origin": "*",
     },
   });
 
-  if (ctx && typeof ctx.waitUntil === "function") {
+  var newMetaEtag = upstream.headers.get("etag") || null;
+  var newMetaLastModified = upstream.headers.get("last-modified") || null;
+
+  async function persistImageSideEffects() {
     try {
-      ctx.waitUntil(cache.put(cacheKey, responseToCache.clone()));
+      if (newMetaEtag || newMetaLastModified) {
+        await env.CATALOG_KV.put(
+          metaKey,
+          JSON.stringify({ etag: newMetaEtag, lastModified: newMetaLastModified, savedAt: Date.now() })
+        );
+      }
     } catch (e) {}
-    try {
-      ctx.waitUntil(maybeRunLazyOcr(env, targetUrl.toString(), buffer, contentType));
-    } catch (e) {}
-  } else {
+
     try {
       await cache.put(cacheKey, responseToCache.clone());
     } catch (e) {}
+
+    if (imageChangedAtOrigin) {
+      try {
+        var ocrHash = await sha256HexFromString(targetUrl.toString());
+        await env.CATALOG_KV.delete(OCR_TEXT_PREFIX + ocrHash);
+      } catch (e) {}
+    }
+
+    try {
+      await maybeRunLazyOcr(env, targetUrl.toString(), buffer, contentType);
+    } catch (e) {}
+  }
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(persistImageSideEffects());
+  } else {
+    await persistImageSideEffects();
   }
 
   return responseToCache;
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// ‼️ جدید (بخش ۴) — راه‌اندازی Vectorize از طریق توکن API (بدون خط‌فرمان)
+// راه‌اندازی Vectorize از طریق توکن API (بدون خط‌فرمان) — بدون تغییر
 // ══════════════════════════════════════════════════════════════════════
 
-// یک نام یکتا و مجاز برای ایندکس Vectorize می‌سازد (فقط حروف کوچک لاتین،
-// عدد، خط‌تیره؛ کمتر از ۳۲ کاراکتر؛ با حرف شروع می‌شود).
 function buildVectorizeIndexName(workerOrigin) {
   var base = "shop-vec";
   try {
@@ -488,8 +617,6 @@ function buildVectorizeIndexName(workerOrigin) {
   return base.slice(0, 31);
 }
 
-// از REST API خودِ Cloudflare (نه wrangler) برای ساخت ایندکس Vectorize
-// استفاده می‌کند. هرگز throw نمی‌کند؛ همیشه { ok, ... } برمی‌گرداند.
 async function createVectorizeIndexViaApi(accountId, apiToken, indexName) {
   var controller = new AbortController();
   var timeoutId = setTimeout(function () {
@@ -524,7 +651,6 @@ async function createVectorizeIndexViaApi(accountId, apiToken, indexName) {
       return { ok: false, error: "این توکن API اجازه‌ی کافی ندارد. مطمئن شوید هنگام ساخت توکن، دسترسی «Vectorize - Edit» را انتخاب کرده‌اید." };
     }
 
-    // اگر قبلاً همین ایندکس ساخته شده، آن را یک موفقیت در نظر بگیر (نه خطا)
     var alreadyExists =
       data &&
       data.errors &&
@@ -619,7 +745,7 @@ async function handleVectorizeStatus(env) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// صفحه‌ی landing — کارت سوم (Vectorize) اضافه شده
+// صفحه‌ی landing — بدون تغییر
 // ══════════════════════════════════════════════════════════════════════
 
 function landingPageHtml() {
@@ -911,7 +1037,7 @@ function landingPageHtml() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// ‼️ بخش ۲ — خزش تدریجی، صفحه‌بندی‌شده و ازسرگیری‌پذیر، مستقیم در D1
+// بخش ۲ — خزش تدریجی، صفحه‌بندی‌شده و ازسرگیری‌پذیر، مستقیم در D1 — بدون تغییر
 // ══════════════════════════════════════════════════════════════════════
 
 async function selfFetchText(url) {
@@ -1058,12 +1184,6 @@ async function tryDirectProductsApi(url) {
   }
 }
 
-// ‼️ جدید — به‌جای برگرداندنِ لیستِ محدودِ لینک‌های محصول (که در نسخه‌ی
-// قبلی مستقیم به ۱۸ تا بریده می‌شد)، حالا فقط «برگ‌های sitemap» (خودِ
-// فایل‌های sitemap.xml حاوی <loc>) را برمی‌گرداند — این آرایه معمولاً
-// چند ده تایی است، نه میلیونی، پس ذخیره‌اش در D1 مشکلی ندارد. فهرستِ
-// واقعیِ لینک‌های محصول از داخل هر برگ، در لحظه‌ی نیاز (در
-// continueCrawlPageD1) خوانده می‌شود.
 async function discoverLeafSitemapsD1(origin) {
   var candidates = [origin + "/sitemap_index.xml", origin + "/sitemap.xml"];
   for (var i = 0; i < candidates.length; i++) {
@@ -1077,17 +1197,15 @@ async function discoverLeafSitemapsD1(origin) {
       while ((m = re.exec(text)) !== null) subLocs.push(m[1]);
       if (subLocs.length) return subLocs;
     } else if (/<urlset/i.test(text) || /<loc>/i.test(text)) {
-      // خودِ همین فایل، یک sitemap برگ است (لیست مستقیم لینک‌ها)
       return [candidates[i]];
     }
   }
-  return []; // هیچ sitemap ای پیدا نشد
+  return [];
 }
 
 async function getCrawlStateD1(env) {
   var row = await env.CATALOG_DB.prepare("SELECT * FROM crawl_state WHERE id = 1").first();
   if (!row) {
-    // فقط برای اطمینان؛ migration بخش ۱ همین الان این ردیف را ساخته بود
     await env.CATALOG_DB.prepare(
       "INSERT OR IGNORE INTO crawl_state (id, phase, sitemap_urls, next_index, total_found, total_crawled) VALUES (1, 'idle', '{}', 0, 0, 0)"
     ).run();
@@ -1110,10 +1228,6 @@ async function saveCrawlStateD1(env, patch) {
   await stmt.bind.apply(stmt, values).run();
 }
 
-// چند محصول را یک‌جا (batch) در D1 upsert می‌کند. اگر محصولی url نداشته
-// باشد، یک شناسه‌ی تصادفی موقت برایش می‌سازیم تا محدودیت UNIQUE(url)
-// خراب نشود؛ در عمل استخراج JSON-LD/OG همیشه یک url (حداقل همان آدرس
-// صفحه) می‌گذارد، پس این حالت نادر است.
 async function upsertProductsBatchD1(env, products) {
   var list = Array.isArray(products) ? products : [];
   if (!list.length) return;
@@ -1143,8 +1257,6 @@ async function upsertProductsBatchD1(env, products) {
   try {
     await env.CATALOG_DB.batch(stmts);
   } catch (batchErr) {
-    // اگر batch یک‌جا خطا داد (مثلاً یک محصول ساختار عجیبی داشت)، تک‌تک
-    // امتحان می‌کنیم تا فقط همان یکی رد شود، نه کل دسته.
     for (var i = 0; i < stmts.length; i++) {
       try {
         await stmts[i].run();
@@ -1153,10 +1265,6 @@ async function upsertProductsBatchD1(env, products) {
   }
 }
 
-// اگر D1 هنوز خالی است ولی از تأیید اولیه (register/verify در
-// shop-assistant مرکزی) یک کاتالوگ کوچک در KV باقی مانده، همان را یک‌بار
-// در D1 seed می‌کند — تا بلافاصله بعد از اتصال، /catalog و /search خالی
-// نباشند و منتظر اولین اجرای ساعتی self-refresh نمانند.
 async function bootstrapFromLegacyKvIfEmpty(env) {
   try {
     var countRow = await env.CATALOG_DB.prepare("SELECT COUNT(*) AS c FROM products").first();
@@ -1187,11 +1295,6 @@ async function getShopOriginFromKv(env) {
   }
 }
 
-// یک بخش از کار خزش را انجام می‌دهد: حداکثر SELF_REFRESH_MAX_PAGES صفحه‌ی
-// محصول را از دقیقاً همان‌جایی که دفعه‌ی قبل متوقف شده بود می‌خواند و در
-// D1 می‌نویسد، و وضعیت (leafIndex/urlOffset) را برای اجرای بعدی ذخیره
-// می‌کند. اگر به انتهای همه‌ی برگ‌های sitemap برسد، phase را 'done'
-// می‌کند تا اجرای بعدی، بعد از کول‌داون، یک دور تازه شروع کند.
 async function continueCrawlPageD1(env, origin, stateRow) {
   var stateData;
   try {
@@ -1208,8 +1311,6 @@ async function continueCrawlPageD1(env, origin, stateRow) {
   var totalCrawled = stateRow.total_crawled || 0;
   var totalFound = stateRow.total_found || 0;
 
-  // اگر اصلاً sitemap ای پیدا نشد → فقط خودِ صفحه‌ی اصلی را یک‌بار
-  // پردازش کن و همان‌جا phase را done کن (دقیقاً رفتار پشتیبانِ قبلی).
   if (!leaves.length) {
     var path = "/";
     try {
@@ -1245,7 +1346,6 @@ async function continueCrawlPageD1(env, origin, stateRow) {
     var leafText = await selfFetchText(leafUrl);
 
     if (!leafText) {
-      // این برگ خراب/در دسترس‌نبود؛ رد شو و برو سراغ برگ بعدی
       leafIndex++;
       urlOffset = 0;
       continue;
@@ -1310,9 +1410,6 @@ async function continueCrawlPageD1(env, origin, stateRow) {
   });
 }
 
-// نقطه‌ی ورود چرخه‌ی ساعتی — نامش نسبت به نسخه‌ی قبلی عوض نشده (هنوز هم
-// runSelfRefreshCycle نام دارد) چون scheduled() پایین‌تر همین نام را
-// صدا می‌زند؛ فقط بدنه‌اش کاملاً برای نوشتن در D1 بازنویسی شده.
 async function runSelfRefreshCycle(env) {
   try {
     var origin = await getShopOriginFromKv(env);
@@ -1335,13 +1432,11 @@ async function runSelfRefreshCycle(env) {
     if (state.phase === "done") {
       var elapsedSinceLastRun = Date.now() - (state.last_run_at || 0);
       if (elapsedSinceLastRun < SELF_REFRESH_FULL_CYCLE_COOLDOWN_MS) {
-        return; // دور کامل قبلی هنوز «تازه» است؛ فعلاً کاری نکن
+        return;
       }
     }
 
     if (state.phase === "idle" || state.phase === "done") {
-      // ابتدا یک تلاش سریع برای API مستقیم محصولات (اگر فروشگاه چنین
-      // چیزی داشته باشد، خیلی سریع‌تر و دقیق‌تر از خزش صفحه‌به‌صفحه است)
       var direct = await tryDirectProductsApi(cleanOrigin);
       if (direct && direct.length) {
         await upsertProductsBatchD1(env, direct);
@@ -1356,8 +1451,6 @@ async function runSelfRefreshCycle(env) {
         return;
       }
 
-      // در غیر این صورت، sitemap را کشف کن و یک دور تازه‌ی خزشِ
-      // صفحه‌بندی‌شده را شروع کن
       var leaves = await discoverLeafSitemapsD1(cleanOrigin);
       await saveCrawlStateD1(env, {
         phase: "crawling",
@@ -1384,12 +1477,9 @@ async function runSelfRefreshCycle(env) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// ‼️ بخش ۳ — /catalog (از D1) + /search (FTS5، با ادغام Vectorize در بخش ۴)
+// بخش ۳ — /catalog (از D1) + /search (FTS5) — بدون تغییر
 // ══════════════════════════════════════════════════════════════════════
 
-// ردیف خام D1 را به همان ساختار محصولی که app.js/widget.js انتظار
-// دارند تبدیل می‌کند (title, price, currency, image, url, in_stock,
-// ocr_text, source).
 function dbRowToProduct(r) {
   var out = {
     url: r.url || "",
@@ -1404,10 +1494,6 @@ function dbRowToProduct(r) {
   return out;
 }
 
-// برای هر محصولی که فیلد image دارد و قبلاً حداقل یک‌بار (از طریق /img)
-// دیده و OCR شده، متن OCR ذخیره‌شده در KV را در همان محصول ادغام می‌کند.
-// این تابع بدون تغییر از نسخه‌ی قبلی حفظ شده؛ فقط حالا منبع products،
-// D1 است نه KV.
 async function mergeOcrTextIntoProducts(env, products) {
   var list = Array.isArray(products) ? products : [];
   for (var i = 0; i < list.length; i++) {
@@ -1422,16 +1508,11 @@ async function mergeOcrTextIntoProducts(env, products) {
           product.ocr_text = parsed.text;
         }
       }
-    } catch (e) {
-      // این یک محصول را رد کن، ادامه بده
-    }
+    } catch (e) {}
   }
   return list;
 }
 
-// نقطه‌ی ورود GET /catalog — حالا از D1 می‌خواند (نه KV)، با
-// صفحه‌بندی اختیاری (limit/offset) تا کاتالوگ‌های خیلی بزرگ یک‌جا
-// پاسخ را غیرقابل‌استفاده نکنند. کش لبه‌ای ۳ دقیقه‌ای هم حفظ شده.
 async function handleCatalogRequest(request, env, ctx) {
   var cache = caches.default;
   var cachedResponse = await cache.match(request);
@@ -1459,9 +1540,7 @@ async function handleCatalogRequest(request, env, ctx) {
 
   try {
     products = await mergeOcrTextIntoProducts(env, products);
-  } catch (mergeErr) {
-    // نادیده گرفته می‌شود؛ کاتالوگ بدون ocr_text تازه برگردانده می‌شود
-  }
+  } catch (mergeErr) {}
 
   var payload = {
     origin: origin,
@@ -1485,8 +1564,6 @@ async function handleCatalogRequest(request, env, ctx) {
   return response;
 }
 
-// یک عبارت جست‌وجوی کاربر را به کوئری FTS5 (با پیشوندجویی روی هر کلمه)
-// تبدیل می‌کند تا نیم‌کلمه/غلط تایپی جزئی هم نتیجه بدهد.
 function buildFts5MatchQuery(q) {
   var words = String(q || "")
     .replace(/["]/g, " ")
@@ -1542,11 +1619,9 @@ async function searchWithFts5(env, q, limit) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// ‼️ بخش ۴ — لایه‌ی جست‌وجوی معنایی Vectorize (اختیاری، با سقوط امن)
+// بخش ۴ — لایه‌ی جست‌وجوی معنایی Vectorize — بدون تغییر
 // ══════════════════════════════════════════════════════════════════════
 
-// یک متن را با API رسمی embedContent گوگل به بردار ۷۶۸بعدی تبدیل
-// می‌کند. هرگز throw نمی‌کند؛ در هر مشکلی null برمی‌گرداند.
 async function embedTextWithGemini(geminiApiKey, text) {
   if (!text) return null;
   var endpoint =
@@ -1594,12 +1669,6 @@ async function getStoredGeminiKey(env) {
   }
 }
 
-// در هر اجرای scheduled()، حداکثر VECTOR_EMBED_BATCH_SIZE محصولِ
-// «امبد‌نشده‌ی بعدی» را می‌گیرد، بردارشان را می‌سازد و در Vectorize
-// ذخیره می‌کند. وقتی به انتهای جدول رسید، از اول (id=0) شروع می‌کند تا
-// محصولاتی که بعداً ویرایش شدند هم به‌مرور دوباره امبد شوند. اگر
-// Vectorize بایند نشده باشد یا کلید Gemini وصل نشده باشد، بی‌سروصدا
-// و بدون خطا هیچ‌کاری نمی‌کند.
 async function buildVectorizeIndexIncrementally(env) {
   if (!env.VECTOR_INDEX) return;
 
@@ -1618,8 +1687,6 @@ async function buildVectorizeIndexIncrementally(env) {
     var products = (rows && rows.results) || [];
 
     if (!products.length) {
-      // به انتهای جدول رسیدیم؛ دور بعدی از اول شروع می‌شود تا محصولات
-      // ویرایش‌شده هم به‌روز بمانند.
       await env.CATALOG_DB.prepare("UPDATE embed_state SET last_embedded_product_id = 0, last_run_at = ? WHERE id = 1")
         .bind(Date.now())
         .run();
@@ -1660,11 +1727,6 @@ async function buildVectorizeIndexIncrementally(env) {
   }
 }
 
-// جست‌وجوی معنایی: عبارت کاربر را امبد می‌کند، در Vectorize نزدیک‌ترین
-// بردارها را پیدا می‌کند، بعد همان محصولات را از D1 (با همان ترتیب
-// امتیاز) برمی‌دارد. اگر هر مرحله شکست بخورد (Vectorize بایند نشده،
-// کلید Gemini نیست، خطای شبکه)، null برمی‌گرداند — فراخواننده باید به
-// FTS5 سقوط کند، نه اینکه خطا بدهد.
 async function searchWithVectorize(env, queryText, limit) {
   if (!env.VECTOR_INDEX) return null;
 
@@ -1721,8 +1783,6 @@ async function searchWithVectorize(env, queryText, limit) {
   return mergeOcrTextIntoProducts(env, ordered);
 }
 
-// نقطه‌ی ورود GET /search — اول Vectorize (اگر فعال بود)، در غیر این
-// صورت (یا اگر شکست خورد) خودکار و بی‌صدا به FTS5 روی D1 سقوط می‌کند.
 async function handleSearchRequest(request, env, ctx) {
   var url = new URL(request.url);
   var q = (url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
@@ -1753,7 +1813,7 @@ async function handleSearchRequest(request, env, ctx) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// روتینگ اصلی
+// روتینگ اصلی — بدون تغییر
 // ══════════════════════════════════════════════════════════════════════
 
 export default {
