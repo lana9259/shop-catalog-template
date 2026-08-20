@@ -677,14 +677,25 @@ async function handleSetupVectorize(request, env) {
   } catch (e) {
     return json({ error: "بدنه‌ی درخواست نامعتبر است" }, 400);
   }
-  if (!body || !body.accountId || !body.apiToken) {
-    return json({ error: "شناسه‌ی حساب (Account ID) و توکن API هر دو لازم هستند" }, 400);
+  if (!body || !body.accountId || !body.apiToken || !body.geminiApiKey) {
+    return json({ error: "شناسه‌ی حساب (Account ID)، توکن API، و کلید Gemini هر سه لازم هستند" }, 400);
   }
 
   var accountId = String(body.accountId).trim();
   var apiToken = String(body.apiToken).trim();
-  if (!accountId || !apiToken) {
-    return json({ error: "شناسه‌ی حساب و توکن نمی‌توانند خالی باشند" }, 400);
+  var geminiApiKey = String(body.geminiApiKey).trim();
+  if (!accountId || !apiToken || !geminiApiKey) {
+    return json({ error: "شناسه‌ی حساب، توکن، و کلید Gemini نمی‌توانند خالی باشند" }, 400);
+  }
+
+  // ‼️ اصلاحیه — این کارت (۳) دیگر به کلید Gemini کارت ۲ (OCR) وابسته
+  // نیست؛ کلید Gemini خودش را جداگانه می‌گیرد و همین‌جا اعتبارسنجی
+  // می‌کند، تا اگر فروشنده فقط همین کارت را وصل کند (بدون کارت ۲)،
+  // جست‌وجوی معنایی واقعاً کار کند، نه اینکه بی‌صدا و بدون هیچ بردار
+  // ذخیره‌شده‌ای خالی بماند.
+  var geminiValidation = await validateGeminiKey(geminiApiKey);
+  if (!geminiValidation.ok) {
+    return json({ error: "کلید Gemini نامعتبر است: " + geminiValidation.error }, 400);
   }
 
   var workerOrigin = new URL(request.url).origin;
@@ -700,6 +711,7 @@ async function handleSetupVectorize(request, env) {
     JSON.stringify({
       accountId: accountId,
       apiToken: apiToken,
+      geminiApiKey: geminiApiKey,
       indexName: result.indexName,
       indexCreatedAt: Date.now(),
       indexReadyForBinding: true,
@@ -826,11 +838,13 @@ function landingPageHtml() {
     '<div class="card" style="text-align:right;">' +
     "<h2 style=\"text-align:center;\">🧠 ۳) فعال‌سازی جست‌وجوی معنایی هوشمند (اختیاری، پیشرفته)</h2>" +
     '<div id="vecStatusPill" class="status-pill off" style="display:block;text-align:center;">در حال بررسی وضعیت...</div>' +
-    "<p>این بخش باعث می‌شود دستیار، معنیِ سوال کاربر را بفهمد (نه فقط کلمه‌به‌کلمه)، حتی وقتی فروشگاه شما میلیون‌ها محصول داشته باشد. کاملاً اختیاری است؛ بدون این کارت هم جست‌وجوی کلمه‌ای عادی همیشه کار می‌کند. برای فعال‌سازی، به یک «توکن API» از حساب Cloudflare خودتان نیاز دارید (نه کلید‌های بالا).</p>" +
+    "<p>این بخش باعث می‌شود دستیار، معنیِ سوال کاربر را بفهمد (نه فقط کلمه‌به‌کلمه)، حتی وقتی فروشگاه شما میلیون‌ها محصول داشته باشد. کاملاً اختیاری است؛ بدون این کارت هم جست‌وجوی کلمه‌ای عادی همیشه کار می‌کند. برای فعال‌سازی، به سه چیز نیاز دارید: یک «توکن API» از حساب Cloudflare، و یک کلید Gemini (مستقل از کلید کارت ۲ بالا — حتی اگر آنجا کلید وارد کرده‌اید، اینجا هم باید دوباره وارد کنید).</p>" +
     '<label class="field-label">شناسه‌ی حساب Cloudflare (Account ID)</label>' +
     '<input id="cfAccountIdInput" class="wide" type="text" placeholder="یک رشته‌ی ۳۲ کاراکتری">' +
     '<label class="field-label">توکن API Cloudflare</label>' +
     '<input id="cfApiTokenInput" class="wide" type="password" placeholder="با دسترسی Vectorize - Edit">' +
+    '<label class="field-label">کلید Gemini API (مخصوص همین بخش)</label>' +
+    '<input id="vecGeminiKeyInput" class="wide" type="password" placeholder="AIza... (می‌تواند همان کلید کارت ۲ یا کلیدی تازه باشد)">' +
     '<button id="setupVectorizeBtn" class="secondary" onclick="setupVectorize()">🧠 ساخت ایندکس جست‌وجوی معنایی</button>' +
     '<button type="button" class="fallback-toggle" onclick="toggleVecHelp()" style="display:block;margin:10px auto 0;">نمی‌دانم این‌ها را از کجا پیدا کنم؟</button>' +
     '<div id="vecHelpBox" class="help-box" style="display:none;">' +
@@ -997,14 +1011,16 @@ function landingPageHtml() {
     "async function setupVectorize(){" +
     'var accInput=document.getElementById("cfAccountIdInput");' +
     'var tokInput=document.getElementById("cfApiTokenInput");' +
+    'var geminiInput=document.getElementById("vecGeminiKeyInput");' +
     'var btn=document.getElementById("setupVectorizeBtn");' +
     'var msgEl=document.getElementById("vecMsg");' +
     'var tomlBox=document.getElementById("vecTomlBox");' +
     'var tomlSnippet=document.getElementById("vecTomlSnippet");' +
     "var accountId=accInput.value.trim();" +
     "var apiToken=tokInput.value.trim();" +
-    "if(!accountId || !apiToken){" +
-    'msgEl.className="err";msgEl.textContent="هر دو مقدار لازم است.";' +
+    "var geminiApiKey=geminiInput.value.trim();" +
+    "if(!accountId || !apiToken || !geminiApiKey){" +
+    'msgEl.className="err";msgEl.textContent="هر سه مقدار (شناسه‌ی حساب، توکن، و کلید Gemini) لازم است.";' +
     "return;" +
     "}" +
     "btn.disabled=true;" +
@@ -1012,7 +1028,7 @@ function landingPageHtml() {
     "try{" +
     'var res=await fetch("/setup-vectorize",{' +
     'method:"POST",headers:{"Content-Type":"application/json"},' +
-    "body:JSON.stringify({accountId:accountId,apiToken:apiToken})});" +
+    "body:JSON.stringify({accountId:accountId,apiToken:apiToken,geminiApiKey:geminiApiKey})});" +
     "var data=await res.json();" +
     "if(!res.ok){" +
     'msgEl.className="err";msgEl.textContent=data.error||"ساخت ایندکس ناموفق بود.";' +
@@ -1023,6 +1039,7 @@ function landingPageHtml() {
     "tomlSnippet.textContent=data.nextStepToml;" +
     'tomlBox.style.display="block";' +
     "tokInput.value=\"\";" +
+    "geminiInput.value=\"\";" +
     "btn.disabled=false;" +
     "refreshVecStatus();" +
     "}catch(e){" +
@@ -1669,11 +1686,28 @@ async function getStoredGeminiKey(env) {
   }
 }
 
+// ‼️ اصلاحیه — کلید Gemini مخصوص Vectorize را از پیکربندی جداگانه‌ی
+// خودِ Vectorize (VECTORIZE_CONFIG_KEY) می‌خواند، نه از پیکربندی OCR
+// (OCR_CONFIG_KEY). قبلاً این دو اشتباهاً یکی فرض شده بودند؛ حالا کاملاً
+// مستقل‌اند: فروشنده می‌تواند فقط کارت ۲ (OCR) را وصل کند، فقط کارت ۳
+// (Vectorize) را وصل کند، هر دو را، یا هیچ‌کدام را — هرکدام کاملاً
+// مستقل کار می‌کند.
+async function getVectorizeGeminiKey(env) {
+  try {
+    var raw = await env.CATALOG_KV.get(VECTORIZE_CONFIG_KEY);
+    if (!raw) return null;
+    var cfg = JSON.parse(raw);
+    return (cfg && cfg.geminiApiKey) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function buildVectorizeIndexIncrementally(env) {
   if (!env.VECTOR_INDEX) return;
 
   try {
-    var geminiApiKey = await getStoredGeminiKey(env);
+    var geminiApiKey = await getVectorizeGeminiKey(env);
     if (!geminiApiKey) return;
 
     var stateRow = await env.CATALOG_DB.prepare("SELECT * FROM embed_state WHERE id = 1").first();
@@ -1730,7 +1764,7 @@ async function buildVectorizeIndexIncrementally(env) {
 async function searchWithVectorize(env, queryText, limit) {
   if (!env.VECTOR_INDEX) return null;
 
-  var geminiApiKey = await getStoredGeminiKey(env);
+  var geminiApiKey = await getVectorizeGeminiKey(env);
   if (!geminiApiKey) return null;
 
   var queryVector = await embedTextWithGemini(geminiApiKey, queryText);
@@ -1784,6 +1818,18 @@ async function searchWithVectorize(env, queryText, limit) {
 }
 
 async function handleSearchRequest(request, env, ctx) {
+  // ‼️ اصلاحیه — قبلاً هدر Cache-Control ست می‌شد ولی هرگز cache.put
+  // صدا زده نمی‌شد، یعنی هیچ جست‌وجویی واقعاً کش نمی‌شد. حالا دقیقاً
+  // همان الگویی که handleCatalogRequest و handleImageProxy از قبل
+  // دارند اینجا هم اعمال شده: اول کش لبه‌ای چک می‌شود؛ اگر جست‌وجوی
+  // عیناً همین (همان q) به‌تازگی انجام شده، بدون هیچ تماسی با D1 یا
+  // Gemini، مستقیم از کش برگردانده می‌شود.
+  var cache = caches.default;
+  var cachedResponse = await cache.match(request);
+  if (cachedResponse) {
+    return cachedResponse;
+  }
+
   var url = new URL(request.url);
   var q = (url.searchParams.get("q") || url.searchParams.get("search") || "").trim();
 
@@ -1796,20 +1842,29 @@ async function handleSearchRequest(request, env, ctx) {
     }
   }
 
+  var response;
   if (vectorResults && vectorResults.length) {
-    return json(
+    response = json(
       { query: q, method: "vectorize", products: vectorResults },
+      200,
+      { "Cache-Control": "public, max-age=60" }
+    );
+  } else {
+    var ftsResults = await searchWithFts5(env, q, SEARCH_MAX_CANDIDATES);
+    response = json(
+      { query: q, method: "fts5", products: ftsResults },
       200,
       { "Cache-Control": "public, max-age=60" }
     );
   }
 
-  var ftsResults = await searchWithFts5(env, q, SEARCH_MAX_CANDIDATES);
-  return json(
-    { query: q, method: "fts5", products: ftsResults },
-    200,
-    { "Cache-Control": "public, max-age=60" }
-  );
+  if (ctx && typeof ctx.waitUntil === "function") {
+    try {
+      ctx.waitUntil(cache.put(request, response.clone()));
+    } catch (e) {}
+  }
+
+  return response;
 }
 
 // ══════════════════════════════════════════════════════════════════════
