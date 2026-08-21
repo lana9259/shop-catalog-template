@@ -1,26 +1,53 @@
 /**
  * worker.js — این فایل روی حساب شخصی خودِ فروشنده اجرا می‌شود، نه حساب من.
  *
- * ‼️ این نسخه، بخش ۵ معماری فدرال را پیاده می‌کند (سخت‌سازی پروکسی /img):
+ * ‼️ این نسخه، «معماری بینایی مشترک (Joint Text+Image Embedding)» را
+ * پیاده‌سازی می‌کند — یعنی مرحله‌ی انتخاب ۱۰ کاندید نهایی دیگر فقط روی
+ * متن کار نمی‌کند؛ همزمان از روی عکس اولِ محصول هم بردار می‌سازد.
  *
- *  بخش ۵ — اعتبارسنجی ETag/Last-Modified به‌جای کش کور یک‌ساله +
- *  نرمال‌سازی کلید کش:
- *    - سقف کش از یک سال به یک روز کاهش پیدا کرده و "immutable" برداشته شده.
- *    - قبل از هر دانلود کامل، اگر ETag/Last-Modified قبلیِ همان عکس را
- *      داریم (در یک رکورد بسیار کوچک در KV، نه خودِ عکس)، یک درخواست
- *      اعتبارسنجی‌شده (conditional) به سایت فروشنده زده می‌شود. اگر سایت
- *      فروشنده بگوید عکس عوض نشده (۳۰۴)، فقط بایت‌ها را دوباره (بدون هدر
- *      شرطی) می‌گیریم چون کپیِ کش لبه منقضی شده؛ ولی متن OCR قبلی دست‌نخورده
- *      می‌ماند. اگر ETag/Last-Modified با نسخه‌ی قبلی فرق داشت، یعنی عکس
- *      واقعاً روی همان آدرس عوض شده — در این حالت متن OCR قدیمیِ همان عکس
- *      حذف می‌شود تا در اولین دیدن بعدی، دوباره و روی عکس تازه محاسبه شود.
- *    - قبل از ساخت کلید کش، پارامترهای رایج ضدکش در آدرس عکس (مثل ?v=2،
- *      ?cache=123، ?t=...) حذف می‌شوند تا همان یک عکس با چند شکل مختلف
- *      URL، فقط یک بار در کش لبه جا بگیرد.
+ *   ۱) EMBEDDING_MODEL از text-embedding-004 به gemini-embedding-2 و
+ *      EMBEDDING_DIMENSIONS از 768 به 1536 تغییر کرد (طبق معماری، این دو
+ *      باید هم در تماس embedding و هم در ساخت ایندکس Vectorize یکسان
+ *      باشند).
+ *   ۲) منطق دانلود/کش عکس که قبلاً فقط داخل handleImageProxy بود، به یک
+ *      تابع مستقل fetchAndCacheImage تبدیل شد؛ هم مسیر /img (برای
+ *      خریدار)، هم چرخه‌ی ساعتیِ ساخت بردار، از همین یک تابع و همین یک
+ *      کش لبه‌ای استفاده می‌کنند — یعنی اگر عکسی قبلاً یک‌بار دیده شده،
+ *      ساخت بردارش برای عکس هیچ هزینه‌ی شبکه‌ای تازه‌ای ندارد.
+ *   ۳) کلید کش عکس دیگر به آدرس Worker (origin) وابسته نیست (چون در
+ *      لحظه‌ی اجرای ساعتی، origin واقعیِ درخواست وجود ندارد)؛ به‌جایش از
+ *      یک پیشوند ثابت داخلی استفاده می‌شود — این تغییر باعث می‌شود هر دو
+ *      مسیر دقیقاً به یک کش مشترک برسند.
+ *   ۴) تابع تازه‌ی embedProductWithGemini در یک تماس embedContent واحد،
+ *      هم part متنی (عنوان+OCR) و هم part عکسی (عکس اول محصول) را
+ *      می‌فرستد و یک بردار واحد می‌گیرد. embedTextWithGemini (برای
+ *      embedding سوال خریدار که فقط متن است) حالا فقط یک پوسته‌ی نازک
+ *      روی همین تابع است.
+ *   ۵) buildVectorizeIndexIncrementally حالا برای هر محصول، اول عکس اولش
+ *      را (اگر داشت) می‌گیرد و همراه متن embed می‌کند؛ اگر عکس نبود یا
+ *      دانلودش شکست خورد، فقط متن فرستاده می‌شود — هیچ محصولی به‌خاطر
+ *      این تغییر، ایندکس‌نشده نمی‌ماند. به‌عنوان یک مزیت جانبی رایگان،
+ *      چون عکس در همین مرحله دانلود می‌شود، OCR تنبل هم (اگر کلید کارت ۲
+ *      وصل بود) همین‌جا فرصت اجرا پیدا می‌کند، نه فقط وقتی خریدار عکس را
+ *      دیده باشد.
+ *   ۶) VECTOR_EMBED_BATCH_SIZE از ۲۰ به ۵ کاهش پیدا کرد، چون فرستادن
+ *      عکس در هر تماس، هم درخواست را سنگین‌تر می‌کند هم کندتر — طبق
+ *      همان مصالحه‌ی «صبورانه و تدریجی» که در معماری توضیح داده شد.
+ *   ۷) دو تابع تازه (deleteVectorizeIndexViaApi و
+ *      handleMigrateVectorizeForImages) + مسیر تازه‌ی
+ *      POST /migrate-vectorize-for-images اضافه شدند: مخصوص فروشنده‌هایی
+ *      که از قبل کارت ۳ (Vectorize) را با بُعد قدیمی (768) وصل کرده
+ *      بودند. این مسیر ایندکس قدیمی را حذف، با بُعد جدید (1536) دوباره
+ *      می‌سازد، و شمارنده‌ی ایندکس‌سازی (embed_state) را صفر می‌کند تا
+ *      همه‌ی محصولات از نو، این‌بار با روش مشترک عکس+متن، بردار بگیرند.
+ *      یک دکمه‌ی تازه در صفحه‌ی landing (کارت ۳) این مسیر را صدا می‌زند؛
+ *      این دکمه فقط برای اتصال‌های قدیمی (indexAware نبودن) نشان داده
+ *      می‌شود — اتصال‌های تازه از همان اول تصویری ساخته می‌شوند و اصلاً
+ *      نیازی به این دکمه ندارند.
  *
- * هیچ منطق دیگری (خزش D1، /catalog، /search، Vectorize، مسیرهای /setup،
- * /internal-token، /update، صفحه‌ی landing، دکمه‌ی «اتصال خودکار») تغییر
- * نکرده است.
+ * هیچ منطق دیگری (خزش D1، /catalog، /search با FTS5، مسیرهای /setup،
+ * /internal-token، /update، صفحه‌ی landing غیر از کارت ۳، دکمه‌ی
+ * «اتصال خودکار») تغییر نکرده است.
  */
 
 const CATALOG_KEY = "catalog";
@@ -29,65 +56,55 @@ const OCR_CONFIG_KEY = "ocr-config";
 const OCR_TEXT_PREFIX = "ocr:";
 const VECTORIZE_CONFIG_KEY = "vectorize-config";
 
-// ‼️ جدید (بخش ۵) — پیشوند رکوردهای بسیار کوچکِ ETag/Last-Modified هر
-// عکس. این رکوردها فقط چند ده بایت هستند (نه خودِ عکس)، پس هیچ فشاری به
-// سقف فضا یا نوشتن KV وارد نمی‌کنند.
 const IMG_META_KV_PREFIX = "imgmeta:";
 
-// ‼️ جدید (بخش ۵) — نام پارامترهای رایج «ضدکش» که سایت‌های فروشگاهی
-// معمولاً به انتهای آدرس عکس اضافه می‌کنند بدون اینکه خودِ عکس عوض شود.
-// این پارامترها فقط از کلید کش حذف می‌شوند؛ در خودِ درخواست واقعی به
-// سایت فروشنده دست‌نخورده باقی می‌مانند (چون شاید برای برخی سایت‌ها واقعاً
-// لازم باشند).
 const IMG_CACHE_BUST_PARAM_NAMES = [
   "v", "ver", "version", "cache", "cb", "_", "t", "ts",
   "timestamp", "rand", "r", "nocache", "cachebust",
 ];
 
-// ‼️ آدرس سرور مرکزی — همانی که در سایت ما (worker.js اصلی) هست.
+// ‼️ جدید — پیشوند ثابت و داخلی برای ساخت کلید کش عکس، به‌جای آدرس واقعی
+// Worker (origin). این پیشوند در دو جای مختلف کد استفاده می‌شود (پروکسی
+// عکس برای خریدار، و ساخت بردار در چرخه‌ی ساعتی) تا هر دو دقیقاً به یک
+// کش مشترک برسند، چون در لحظه‌ی اجرای ساعتی، origin واقعیِ یک درخواست
+// وجود ندارد.
+const IMG_CACHE_KEY_PREFIX = "https://img-cache.internal";
+
 const CENTRAL_SERVER_URL = "https://shop-assistant.laana9258.workers.dev";
 
-// تنظیمات مخصوص چرخه‌ی خودکار ساعتی (self-refresh).
 const SELF_REFRESH_BOT_UA =
   "SA-ShopSelfRefresh/1.0 (+https://ai-assistant-cpl.pages.dev/bot-info)";
 const SELF_REFRESH_FETCH_TIMEOUT_MS = 10000;
 const SELF_REFRESH_MAX_RESPONSE_CHARS = 900000;
-const SELF_REFRESH_MAX_PAGES = 18; // حداکثر صفحه‌ی محصول در هر یک اجرای چرخه (هر ساعت)
+const SELF_REFRESH_MAX_PAGES = 18;
 const SELF_REFRESH_PRODUCT_PATH_HINTS = ["/product", "/products", "/shop/", "/item/", "/p/"];
-const SELF_REFRESH_FULL_CYCLE_COOLDOWN_MS = 20 * 60 * 60 * 1000; // ۲۰ ساعت
+const SELF_REFRESH_FULL_CYCLE_COOLDOWN_MS = 20 * 60 * 60 * 1000;
 
-// تنظیمات مخصوص اعتبارسنجی کلید Gemini (برای کارت OCR در landing).
 const GENERIC_VALIDATE_TIMEOUT_MS = 10000;
 
-// ‼️ تنظیمات مخصوص پروکسی عکس — بخش ۵ (Cache API لبه‌ای Cloudflare +
-// اعتبارسنجی ETag/Last-Modified).
 const IMG_PROXY_FETCH_TIMEOUT_MS = 15000;
-const IMG_MAX_BYTES = 15 * 1024 * 1024; // سقف ۱۵ مگابایت برای هر عکس؛ فقط برای جلوگیری از سوءاستفاده
-// ‼️ تغییر (بخش ۵) — قبلاً ۱ سال (immutable) بود؛ حالا ۱ روز است، بدون
-// immutable، چون دیگر کورکورانه به کش قدیمی اعتماد نمی‌کنیم.
-const IMG_PROXY_CACHE_SECONDS = 60 * 60 * 24; // ۱ روز
+const IMG_MAX_BYTES = 15 * 1024 * 1024;
+const IMG_PROXY_CACHE_SECONDS = 60 * 60 * 24;
 
-// تنظیمات مخصوص OCR تنبل (اجرا در لحظه‌ی اولین دیدن هر عکس).
-const OCR_GEMINI_MODEL = "gemini-3.1-flash-lite"; // همان مدلی که app.js برای چت هم استفاده می‌کند
+const OCR_GEMINI_MODEL = "gemini-3.1-flash-lite";
 const OCR_GEMINI_TIMEOUT_MS = 12000;
 const OCR_MAX_TEXT_CHARS = 2000;
 const OCR_EMPTY_MARKER = "(بدون متن)";
 
-// کش لبه‌ای پاسخ /catalog، تا کوئری‌های D1 فشار زیادی به دیتابیس نزنند.
-const CATALOG_EDGE_CACHE_SECONDS = 180; // ۳ دقیقه
+const CATALOG_EDGE_CACHE_SECONDS = 180;
 
-// تنظیمات مسیر /catalog (خواندن صفحه‌بندی‌شده از D1).
 const CATALOG_DEFAULT_LIMIT = 5000;
 const CATALOG_MAX_LIMIT = 20000;
 
-// تنظیمات مسیر /search (طبق معماری: حداکثر ۱۰ کاندید).
 const SEARCH_MAX_CANDIDATES = 10;
 
-// تنظیمات مدل embedding و Vectorize.
-const EMBEDDING_MODEL = "text-embedding-004";
-const EMBEDDING_DIMENSIONS = 768;
-const EMBEDDING_TIMEOUT_MS = 12000;
-const VECTOR_EMBED_BATCH_SIZE = 20; // تعداد محصولی که هر بار اجرای scheduled() امبد می‌شود
+// ‼️ تغییر — مدل و بُعدِ embedding، طبق معماری بینایی مشترک.
+const EMBEDDING_MODEL = "gemini-embedding-2";
+const EMBEDDING_DIMENSIONS = 1536;
+const EMBEDDING_TIMEOUT_MS = 20000;
+// ‼️ تغییر — چون هر تماس حالا ممکن است یک عکس هم حمل کند، تعداد
+// محصولی که هر اجرای ساعتی embed می‌شود کاهش پیدا کرده.
+const VECTOR_EMBED_BATCH_SIZE = 5;
 const VECTOR_EMBED_TEXT_MAX_CHARS = 800;
 const VECTORIZE_API_TIMEOUT_MS = 15000;
 
@@ -274,7 +291,9 @@ async function handleOcrConfigStatus(env) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// پروکسی عکس با کش لبه‌ای Cloudflare + OCR تنبل — بخش ۵ (سخت‌سازی)
+// پروکسی/دریافت عکس با کش لبه‌ای Cloudflare + OCR تنبل
+// ‼️ اصلاح‌شده — منطق مشترک دانلود/کش عکس، برای استفاده‌ی هم‌زمان توسط
+// خریدار (/img) و چرخه‌ی ساعتیِ ساخت بردار.
 // ══════════════════════════════════════════════════════════════════════
 
 async function extractOcrTextFromImageBytes(geminiApiKey, base64Data, contentType) {
@@ -383,16 +402,15 @@ async function maybeRunLazyOcr(env, imageUrl, buffer, contentType) {
   }
 }
 
-// ‼️ جدید (بخش ۵) — پارامترهای رایج ضدکش را از آدرس عکس حذف می‌کند و
-// باقی‌مانده را برای پایداری کلید کش مرتب می‌کند. این فقط برای «ساخت
-// کلید کش» استفاده می‌شود؛ خودِ درخواست واقعی به سایت فروشنده همیشه با
-// آدرس اصلی و کامل (بدون حذف هیچ پارامتری) انجام می‌شود.
-function buildNormalizedCacheKeyUrl(targetUrl, workerOrigin) {
+// ‼️ بدون تغییر — پارامترهای ضدکش را از آدرس عکس حذف می‌کند.
+// ‼️ اصلاح‌شده — دیگر workerOrigin نمی‌گیرد؛ از پیشوند ثابت داخلی
+// استفاده می‌کند تا کلید کش، در چرخه‌ی ساعتی هم قابل‌ساخت باشد.
+function buildNormalizedCacheKeyUrl(targetUrl) {
   var cleaned;
   try {
     cleaned = new URL(targetUrl.toString());
   } catch (e) {
-    return workerOrigin + "/img?u=" + encodeURIComponent(targetUrl.toString());
+    return IMG_CACHE_KEY_PREFIX + "/img?u=" + encodeURIComponent(targetUrl.toString());
   }
 
   var namesToDelete = [];
@@ -419,43 +437,36 @@ function buildNormalizedCacheKeyUrl(targetUrl, workerOrigin) {
     cleaned.searchParams.append(pair[0], pair[1]);
   });
 
-  return workerOrigin + "/img?u=" + encodeURIComponent(cleaned.toString());
+  return IMG_CACHE_KEY_PREFIX + "/img?u=" + encodeURIComponent(cleaned.toString());
 }
 
-async function handleImageProxy(request, env, ctx) {
-  var url = new URL(request.url);
-  var rawTarget = url.searchParams.get("u");
-  if (!rawTarget) {
-    return json({ error: "پارامتر u (آدرس عکس) لازم است" }, 400);
-  }
-
+// ‼️ جدید — منطق مشترک دانلود+کش+اعتبارسنجی یک عکس. هم توسط
+// handleImageProxy (برای خریدار) و هم توسط fetchImagePartForEmbedding
+// (برای ساخت بردار در چرخه‌ی ساعتی) صدا زده می‌شود؛ یعنی هر دو مسیر
+// دقیقاً از یک کش مشترک بهره می‌برند.
+async function fetchAndCacheImage(rawTargetUrl, env, ctx) {
   var targetUrl;
   try {
-    targetUrl = new URL(rawTarget);
+    targetUrl = new URL(rawTargetUrl);
   } catch (e) {
-    return json({ error: "آدرس عکس نامعتبر است" }, 400);
+    return { ok: false, error: "آدرس عکس نامعتبر است" };
   }
   if (targetUrl.protocol !== "http:" && targetUrl.protocol !== "https:") {
-    return json({ error: "آدرس عکس نامعتبر است" }, 400);
+    return { ok: false, error: "آدرس عکس نامعتبر است" };
   }
   if (isPrivateOrDisallowedHost(targetUrl.hostname)) {
-    return json({ error: "این آدرس مجاز نیست" }, 400);
+    return { ok: false, error: "این آدرس مجاز نیست" };
   }
 
   var cache = caches.default;
-
-  // ‼️ جدید (بخش ۵) — کلید کش حالا از روی آدرس نرمال‌شده (بدون پارامترهای
-  // ضدکش) ساخته می‌شود، نه از روی آدرس خام درخواست.
-  var normalizedCacheKeyUrlString = buildNormalizedCacheKeyUrl(targetUrl, url.origin);
+  var normalizedCacheKeyUrlString = buildNormalizedCacheKeyUrl(targetUrl);
   var cacheKey = new Request(normalizedCacheKeyUrlString, { method: "GET" });
 
   var cachedResponse = await cache.match(cacheKey);
   if (cachedResponse) {
-    return cachedResponse;
+    return { ok: true, response: cachedResponse, fromCache: true };
   }
 
-  // ‼️ جدید (بخش ۵) — قبل از دانلود کامل، ببین آیا ETag/Last-Modified قبلیِ
-  // همین عکس را داریم (یک رکورد چند ده‌بایتی در KV، نه خودِ عکس).
   var metaKey = IMG_META_KV_PREFIX + (await sha256HexFromString(targetUrl.toString()));
   var previousMeta = null;
   try {
@@ -488,17 +499,13 @@ async function handleImageProxy(request, env, ctx) {
     });
   } catch (e) {
     clearTimeout(timeoutId);
-    return json({ error: "دریافت عکس از سایت فروشنده ناموفق بود" }, 502);
+    return { ok: false, error: "دریافت عکس از سایت فروشنده ناموفق بود" };
   }
   clearTimeout(timeoutId);
 
   var imageChangedAtOrigin = false;
 
   if (upstream.status === 304 && previousMeta) {
-    // ‼️ عکس در سایت فروشنده عوض نشده. کپیِ کش لبه‌ی ما منقضی شده بود
-    // (وگرنه اصلاً به این‌جا نمی‌رسیدیم)، پس باید یک‌بار دیگر، این‌بار
-    // بدون هدر شرطی، بایت‌های واقعی را بگیریم. متن OCR قبلی دست‌نخورده
-    // می‌ماند چون خودِ عکس تغییری نکرده.
     var controller2 = new AbortController();
     var timeoutId2 = setTimeout(function () {
       controller2.abort();
@@ -512,12 +519,10 @@ async function handleImageProxy(request, env, ctx) {
       });
     } catch (e) {
       clearTimeout(timeoutId2);
-      return json({ error: "دریافت عکس از سایت فروشنده ناموفق بود" }, 502);
+      return { ok: false, error: "دریافت عکس از سایت فروشنده ناموفق بود" };
     }
     clearTimeout(timeoutId2);
   } else if (upstream.ok && previousMeta) {
-    // ‼️ اگر ETag/Last-Modified تازه با نسخه‌ی قبلی فرق دارد، یعنی عکس
-    // واقعاً روی همان آدرس عوض شده — بعداً باید OCR قدیمی‌اش را باطل کنیم.
     var newEtagCheck = upstream.headers.get("etag") || null;
     var newLastModifiedCheck = upstream.headers.get("last-modified") || null;
     var etagDiffers = previousMeta.etag && newEtagCheck && previousMeta.etag !== newEtagCheck;
@@ -529,38 +534,36 @@ async function handleImageProxy(request, env, ctx) {
   }
 
   if (!upstream.ok) {
-    return json({ error: "سایت فروشنده این عکس را برنگرداند (HTTP " + upstream.status + ")" }, 502);
+    return { ok: false, error: "سایت فروشنده این عکس را برنگرداند (HTTP " + upstream.status + ")" };
   }
 
   var contentType = upstream.headers.get("content-type") || "image/jpeg";
   if (contentType.indexOf("image/") !== 0) {
-    return json({ error: "پاسخ سایت فروشنده یک عکس نبود" }, 502);
+    return { ok: false, error: "پاسخ سایت فروشنده یک عکس نبود" };
   }
 
   var contentLengthHeader = upstream.headers.get("content-length");
   if (contentLengthHeader && parseInt(contentLengthHeader, 10) > IMG_MAX_BYTES) {
-    return json({ error: "حجم عکس بیش از حد مجاز است" }, 502);
+    return { ok: false, error: "حجم عکس بیش از حد مجاز است" };
   }
 
   var buffer;
   try {
     buffer = await upstream.arrayBuffer();
   } catch (e) {
-    return json({ error: "خواندن عکس ناموفق بود" }, 502);
+    return { ok: false, error: "خواندن عکس ناموفق بود" };
   }
   if (!buffer || buffer.byteLength === 0) {
-    return json({ error: "عکس خالی بود" }, 502);
+    return { ok: false, error: "عکس خالی بود" };
   }
   if (buffer.byteLength > IMG_MAX_BYTES) {
-    return json({ error: "حجم عکس بیش از حد مجاز است" }, 502);
+    return { ok: false, error: "حجم عکس بیش از حد مجاز است" };
   }
 
   var responseToCache = new Response(buffer, {
     status: 200,
     headers: {
       "Content-Type": contentType,
-      // ‼️ تغییر (بخش ۵) — دیگر "immutable" و یک‌سال نیست؛ یک روز، با
-      // اعتبارسنجی ETag/Last-Modified در پس‌زمینه.
       "Cache-Control": "public, max-age=" + IMG_PROXY_CACHE_SECONDS,
       "Access-Control-Allow-Origin": "*",
     },
@@ -601,11 +604,60 @@ async function handleImageProxy(request, env, ctx) {
     await persistImageSideEffects();
   }
 
-  return responseToCache;
+  return { ok: true, response: responseToCache, buffer: buffer, contentType: contentType, fromCache: false };
+}
+
+async function handleImageProxy(request, env, ctx) {
+  var url = new URL(request.url);
+  var rawTarget = url.searchParams.get("u");
+  if (!rawTarget) {
+    return json({ error: "پارامتر u (آدرس عکس) لازم است" }, 400);
+  }
+
+  var result = await fetchAndCacheImage(rawTarget, env, ctx);
+  if (!result.ok) {
+    return json({ error: result.error }, 502);
+  }
+  return result.response;
+}
+
+// ‼️ جدید — عکسِ یک محصول را (با استفاده از همان کش مشترک بالا) می‌گیرد
+// و آن را به شکل { mimeType, base64 } آماده‌ی فرستادن به embedContent
+// برمی‌گرداند. اگر عکسی نبود یا دانلودش شکست خورد، null برمی‌گرداند —
+// هرگز throw نمی‌کند، تا محصولات بدون عکس یا با عکس خراب، فقط با متن
+// embed شوند.
+async function fetchImagePartForEmbedding(imageUrl, env, ctx) {
+  if (!imageUrl) return null;
+  try {
+    var result = await fetchAndCacheImage(imageUrl, env, ctx);
+    if (!result.ok) return null;
+
+    var buffer = result.buffer;
+    var contentType = result.contentType;
+
+    if (!buffer) {
+      // یعنی از کش لبه‌ای آمده (fromCache)؛ بایت‌ها را از خودِ Response بخوان.
+      try {
+        buffer = await result.response.clone().arrayBuffer();
+      } catch (e) {
+        return null;
+      }
+      contentType = contentType || result.response.headers.get("content-type") || "image/jpeg";
+    }
+
+    if (!buffer || buffer.byteLength === 0) return null;
+
+    return {
+      mimeType: contentType || "image/jpeg",
+      base64: uint8ToBase64(new Uint8Array(buffer)),
+    };
+  } catch (e) {
+    return null;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// راه‌اندازی Vectorize از طریق توکن API (بدون خط‌فرمان) — بدون تغییر
+// راه‌اندازی Vectorize از طریق توکن API (بدون خط‌فرمان)
 // ══════════════════════════════════════════════════════════════════════
 
 function buildVectorizeIndexName(workerOrigin) {
@@ -670,6 +722,53 @@ async function createVectorizeIndexViaApi(accountId, apiToken, indexName) {
   }
 }
 
+// ‼️ جدید — حذف یک ایندکس Vectorize از طریق API؛ فقط توسط
+// handleMigrateVectorizeForImages استفاده می‌شود، برای فروشنده‌هایی که
+// می‌خواهند ایندکس قدیمیِ فقط‌متنی‌شان را با بُعد جدید (تصویری) عوض کنند.
+async function deleteVectorizeIndexViaApi(accountId, apiToken, indexName) {
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function () {
+    controller.abort();
+  }, VECTORIZE_API_TIMEOUT_MS);
+
+  try {
+    var res = await fetch(
+      "https://api.cloudflare.com/client/v4/accounts/" +
+        encodeURIComponent(accountId) +
+        "/vectorize/v2/indexes/" +
+        encodeURIComponent(indexName),
+      {
+        method: "DELETE",
+        headers: { Authorization: "Bearer " + apiToken },
+        signal: controller.signal,
+      }
+    );
+    clearTimeout(timeoutId);
+
+    var data = null;
+    try {
+      data = await res.json();
+    } catch (e) {}
+
+    var notFound =
+      data &&
+      data.errors &&
+      data.errors.some(function (e) {
+        return String(e.message || "").toLowerCase().indexOf("not found") !== -1;
+      });
+
+    if (!res.ok && !notFound) {
+      var errMsg = (data && data.errors && data.errors[0] && data.errors[0].message) || "خطای نامشخص از Cloudflare API (HTTP " + res.status + ")";
+      return { ok: false, error: errMsg };
+    }
+
+    return { ok: true };
+  } catch (e) {
+    clearTimeout(timeoutId);
+    return { ok: false, error: "اتصال به Cloudflare API برقرار نشد. اینترنت را بررسی کنید و دوباره تلاش کنید." };
+  }
+}
+
 async function handleSetupVectorize(request, env) {
   var body;
   try {
@@ -688,11 +787,6 @@ async function handleSetupVectorize(request, env) {
     return json({ error: "شناسه‌ی حساب، توکن، و کلید Gemini نمی‌توانند خالی باشند" }, 400);
   }
 
-  // ‼️ اصلاحیه — این کارت (۳) دیگر به کلید Gemini کارت ۲ (OCR) وابسته
-  // نیست؛ کلید Gemini خودش را جداگانه می‌گیرد و همین‌جا اعتبارسنجی
-  // می‌کند، تا اگر فروشنده فقط همین کارت را وصل کند (بدون کارت ۲)،
-  // جست‌وجوی معنایی واقعاً کار کند، نه اینکه بی‌صدا و بدون هیچ بردار
-  // ذخیره‌شده‌ای خالی بماند.
   var geminiValidation = await validateGeminiKey(geminiApiKey);
   if (!geminiValidation.ok) {
     return json({ error: "کلید Gemini نامعتبر است: " + geminiValidation.error }, 400);
@@ -706,6 +800,10 @@ async function handleSetupVectorize(request, env) {
     return json({ error: result.error }, 400);
   }
 
+  // ‼️ جدید — علامت imageAware: true، چون این ایندکس (اگر تازه ساخته شده
+  // باشد) با EMBEDDING_DIMENSIONS جدید (1536، یعنی متن+عکس) ساخته شده.
+  // صفحه‌ی landing از همین علامت برای تصمیم‌گیری درباره‌ی نمایش دکمه‌ی
+  // «بازسازی برای بینایی تصویری» استفاده می‌کند.
   await env.CATALOG_KV.put(
     VECTORIZE_CONFIG_KEY,
     JSON.stringify({
@@ -715,6 +813,7 @@ async function handleSetupVectorize(request, env) {
       indexName: result.indexName,
       indexCreatedAt: Date.now(),
       indexReadyForBinding: true,
+      imageAware: true,
     })
   );
 
@@ -750,14 +849,76 @@ async function handleVectorizeStatus(env) {
     indexCreated: true,
     indexName: cfg.indexName,
     boundLive: boundLive,
+    // ‼️ جدید — اگر این فیلد نبود (یعنی اتصال قدیمی، قبل از این نسخه)،
+    // false در نظر گرفته می‌شود؛ صفحه‌ی landing با این مقدار تصمیم
+    // می‌گیرد دکمه‌ی مهاجرت را نشان دهد یا نه.
+    imageAware: !!cfg.imageAware,
     totalEmbedded: (embedRow && embedRow.total_embedded) || 0,
     lastEmbedRunAt: (embedRow && embedRow.last_run_at) || null,
     lastEmbedError: (embedRow && embedRow.last_error) || null,
   });
 }
 
+// ‼️ جدید — مسیر مهاجرت یک‌باره: ایندکس Vectorize قدیمیِ فقط‌متنی (بُعد
+// ۷۶۸) را حذف و با بُعد تازه (۱۵۳۶، متن+عکس) دوباره می‌سازد، و شمارنده‌ی
+// ایندکس‌سازی را صفر می‌کند تا از اجرای ساعتی بعدی، همه‌ی محصولات از نو
+// و این‌بار همراه با عکس، بردار بگیرند. نیازی به هیچ ورودی تازه از
+// فروشنده نیست چون accountId/apiToken/geminiApiKey از قبل در KV هست.
+async function handleMigrateVectorizeForImages(request, env) {
+  var raw = await env.CATALOG_KV.get(VECTORIZE_CONFIG_KEY);
+  if (!raw) {
+    return json({ error: "ابتدا باید یک‌بار کارت «۳» (جست‌وجوی معنایی) را با اطلاعات Cloudflare خود فعال کرده باشید." }, 400);
+  }
+
+  var cfg;
+  try {
+    cfg = JSON.parse(raw);
+  } catch (e) {
+    return json({ error: "پیکربندی قبلی خراب است؛ کارت «۳» را دوباره فعال کنید." }, 400);
+  }
+  if (!cfg || !cfg.accountId || !cfg.apiToken || !cfg.indexName) {
+    return json({ error: "پیکربندی قبلی ناقص است؛ کارت «۳» را دوباره فعال کنید." }, 400);
+  }
+
+  var delResult = await deleteVectorizeIndexViaApi(cfg.accountId, cfg.apiToken, cfg.indexName);
+  if (!delResult.ok) {
+    return json({ error: "حذف ایندکس قبلی ناموفق بود: " + delResult.error }, 400);
+  }
+
+  var createResult = await createVectorizeIndexViaApi(cfg.accountId, cfg.apiToken, cfg.indexName);
+  if (!createResult.ok) {
+    return json({ error: "ساخت ایندکس تازه ناموفق بود: " + createResult.error }, 400);
+  }
+
+  await env.CATALOG_KV.put(
+    VECTORIZE_CONFIG_KEY,
+    JSON.stringify({
+      accountId: cfg.accountId,
+      apiToken: cfg.apiToken,
+      geminiApiKey: cfg.geminiApiKey,
+      indexName: createResult.indexName,
+      indexCreatedAt: Date.now(),
+      indexReadyForBinding: true,
+      imageAware: true,
+    })
+  );
+
+  try {
+    await env.CATALOG_DB.prepare(
+      "UPDATE embed_state SET last_embedded_product_id = 0, total_embedded = 0, last_run_at = ?, last_error = NULL WHERE id = 1"
+    )
+      .bind(Date.now())
+      .run();
+  } catch (e) {}
+
+  return json({
+    ok: true,
+    message: "ایندکس با موفقیت برای بینایی تصویری بازسازی شد. هیچ تغییری در wrangler.toml لازم نیست (اسم ایندکس همان قبلی است). از اجرای ساعتی بعدی، محصولات دوباره — این‌بار همراه با عکس — ایندکس می‌شوند.",
+  });
+}
+
 // ══════════════════════════════════════════════════════════════════════
-// صفحه‌ی landing — بدون تغییر
+// صفحه‌ی landing
 // ══════════════════════════════════════════════════════════════════════
 
 function landingPageHtml() {
@@ -790,6 +951,7 @@ function landingPageHtml() {
     "#msg{margin-top:16px;font-size:13.5px;min-height:20px;}" +
     "#ocrMsg{margin-top:16px;font-size:13.5px;min-height:20px;text-align:right;}" +
     "#vecMsg{margin-top:16px;font-size:13.5px;min-height:20px;text-align:right;}" +
+    "#vecMigrateMsg{margin-top:12px;font-size:13.5px;min-height:20px;text-align:right;}" +
     ".ok{color:#1f5c3a;} .err{color:#8a4b1c;}" +
     ".field-label{display:block;text-align:right;font-size:12.5px;font-weight:700;color:#0A3838;margin:0 0 6px;}" +
     ".help-box{text-align:right;background:#F1EEE4;border-radius:10px;padding:14px 16px;margin-top:14px;" +
@@ -800,6 +962,8 @@ function landingPageHtml() {
     ".status-pill.off{background:#fdece0;color:#8a4b1c;}" +
     ".toml-box{direction:ltr;text-align:left;background:#1c1a17;color:#d8f0e6;border-radius:10px;" +
     "padding:12px 14px;font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;margin-top:10px;}" +
+    ".migrate-btn{width:100%;padding:14px;font-size:14.5px;font-weight:800;color:#8a4b1c;" +
+    "background:#fdece0;border:2px solid #f0b98a;border-radius:10px;cursor:pointer;margin-top:14px;}" +
     "</style></head><body>" +
     '<div><div class="card">' +
     "<h1>🔗 اتصال انبار فروشگاه</h1>" +
@@ -836,9 +1000,9 @@ function landingPageHtml() {
     "</div>" +
 
     '<div class="card" style="text-align:right;">' +
-    "<h2 style=\"text-align:center;\">🧠 ۳) فعال‌سازی جست‌وجوی معنایی هوشمند (اختیاری، پیشرفته)</h2>" +
+    "<h2 style=\"text-align:center;\">🧠 ۳) فعال‌سازی جست‌وجوی معنایی + بینایی تصویری (اختیاری، پیشرفته)</h2>" +
     '<div id="vecStatusPill" class="status-pill off" style="display:block;text-align:center;">در حال بررسی وضعیت...</div>' +
-    "<p>این بخش باعث می‌شود دستیار، معنیِ سوال کاربر را بفهمد (نه فقط کلمه‌به‌کلمه)، حتی وقتی فروشگاه شما میلیون‌ها محصول داشته باشد. کاملاً اختیاری است؛ بدون این کارت هم جست‌وجوی کلمه‌ای عادی همیشه کار می‌کند. برای فعال‌سازی، به سه چیز نیاز دارید: یک «توکن API» از حساب Cloudflare، و یک کلید Gemini (مستقل از کلید کارت ۲ بالا — حتی اگر آنجا کلید وارد کرده‌اید، اینجا هم باید دوباره وارد کنید).</p>" +
+    "<p>این بخش باعث می‌شود دستیار، معنیِ سوال کاربر را بفهمد (نه فقط کلمه‌به‌کلمه)، و همزمان عکس اصلیِ هر محصول را هم در همان لحظه‌ی انتخاب کاندیدها ببیند — نه فقط در پاسخ نهایی. کاملاً اختیاری است؛ بدون این کارت هم جست‌وجوی کلمه‌ای عادی همیشه کار می‌کند. برای فعال‌سازی، به سه چیز نیاز دارید: یک «توکن API» از حساب Cloudflare، شناسه‌ی حساب، و یک کلید Gemini (مستقل از کلید کارت ۲ بالا — حتی اگر آنجا کلید وارد کرده‌اید، اینجا هم باید دوباره وارد کنید).</p>" +
     '<label class="field-label">شناسه‌ی حساب Cloudflare (Account ID)</label>' +
     '<input id="cfAccountIdInput" class="wide" type="text" placeholder="یک رشته‌ی ۳۲ کاراکتری">' +
     '<label class="field-label">توکن API Cloudflare</label>' +
@@ -873,6 +1037,11 @@ function landingPageHtml() {
     "<li>پایین صفحه‌ی گیت‌هاب، «Commit changes» را بزنید.</li>" +
     "<li>اگر ریپازیتوری‌تان به‌صورت خودکار به Cloudflare وصل است (همان چیزی که دکمه‌ی Deploy اولیه ساخت)، همین کامیت به‌تنهایی دیپلوی تازه را شروع می‌کند — چیز دیگری لازم نیست.</li>" +
     "</ol>" +
+    "</div>" +
+    '<div id="vecMigrateBox" style="display:none;">' +
+    '<p style="margin-top:16px;color:#8a4b1c;">⚠️ ایندکس فعلی شما قبل از فعال‌شدن «بینایی تصویری» ساخته شده و فقط روی متن کار می‌کند. برای این‌که دستیار عکس محصولات را هم در انتخاب کاندیدها ببیند، یک‌بار روی دکمه‌ی زیر بزنید. این کار ایندکس فعلی را با یک ایندکس تازه (با همان اسم، بدون نیاز به تغییر wrangler.toml) جایگزین می‌کند و باعث می‌شود همه‌ی محصولات از نو ایندکس شوند.</p>' +
+    '<button id="migrateVecBtn" class="migrate-btn" onclick="migrateVectorize()">🖼️ بازسازی ایندکس برای بینایی تصویری</button>' +
+    '<div id="vecMigrateMsg"></div>' +
     "</div>" +
     "</div></div>" +
     "<script>" +
@@ -990,22 +1159,31 @@ function landingPageHtml() {
     "}" +
     "async function refreshVecStatus(){" +
     'var pill=document.getElementById("vecStatusPill");' +
+    'var migrateBox=document.getElementById("vecMigrateBox");' +
     "try{" +
     'var res=await fetch("/vectorize-status");' +
     "var data=await res.json();" +
     "if(data && data.boundLive){" +
     'pill.className="status-pill on";' +
     'pill.textContent="✅ فعال و متصل — جست‌وجوی معنایی کار می‌کند";' +
+    "if(data.imageAware){" +
+    'migrateBox.style.display="none";' +
+    "}else{" +
+    'migrateBox.style.display="block";' +
+    "}" +
     "}else if(data && data.indexCreated){" +
     'pill.className="status-pill off";' +
     'pill.textContent="⏳ ایندکس ساخته شده؛ منتظر آخرین قدم دستی (wrangler.toml)";' +
+    'migrateBox.style.display="none";' +
     "}else{" +
     'pill.className="status-pill off";' +
     'pill.textContent="⏳ هنوز فعال نشده (اختیاری)";' +
+    'migrateBox.style.display="none";' +
     "}" +
     "}catch(e){" +
     'pill.className="status-pill off";' +
     'pill.textContent="⏳ هنوز فعال نشده (اختیاری)";' +
+    'migrateBox.style.display="none";' +
     "}" +
     "}" +
     "async function setupVectorize(){" +
@@ -1041,6 +1219,26 @@ function landingPageHtml() {
     "tokInput.value=\"\";" +
     "geminiInput.value=\"\";" +
     "btn.disabled=false;" +
+    "refreshVecStatus();" +
+    "}catch(e){" +
+    'msgEl.className="err";msgEl.textContent="اتصال به سرور برقرار نشد. اینترنت را بررسی کنید.";' +
+    "btn.disabled=false;" +
+    "}" +
+    "}" +
+    "async function migrateVectorize(){" +
+    'var btn=document.getElementById("migrateVecBtn");' +
+    'var msgEl=document.getElementById("vecMigrateMsg");' +
+    "btn.disabled=true;" +
+    'msgEl.className="";msgEl.textContent="در حال بازسازی ایندکس برای بینایی تصویری...";' +
+    "try{" +
+    'var res=await fetch("/migrate-vectorize-for-images",{method:"POST"});' +
+    "var data=await res.json();" +
+    "if(!res.ok){" +
+    'msgEl.className="err";msgEl.textContent=data.error||"بازسازی ناموفق بود.";' +
+    "btn.disabled=false;" +
+    "return;" +
+    "}" +
+    'msgEl.className="ok";msgEl.textContent="✅ "+data.message;' +
     "refreshVecStatus();" +
     "}catch(e){" +
     'msgEl.className="err";msgEl.textContent="اتصال به سرور برقرار نشد. اینترنت را بررسی کنید.";' +
@@ -1636,11 +1834,20 @@ async function searchWithFts5(env, q, limit) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// بخش ۴ — لایه‌ی جست‌وجوی معنایی Vectorize — بدون تغییر
+// بخش ۴ — لایه‌ی جست‌وجوی معنایی Vectorize (حالا با بینایی مشترک متن+عکس)
 // ══════════════════════════════════════════════════════════════════════
 
-async function embedTextWithGemini(geminiApiKey, text) {
-  if (!text) return null;
+// ‼️ جدید — تماس واحد embedContent که هم متن و هم (اختیاری) عکس را در
+// یک content واحد می‌فرستد و یک بردار تجمیع‌شده می‌گیرد. اگر imagePart
+// نال باشد، دقیقاً مثل قبل فقط متن embed می‌شود.
+async function embedProductWithGemini(geminiApiKey, text, imagePart) {
+  var parts = [];
+  if (text) parts.push({ text: text });
+  if (imagePart && imagePart.base64) {
+    parts.push({ inlineData: { mimeType: imagePart.mimeType || "image/jpeg", data: imagePart.base64 } });
+  }
+  if (!parts.length) return null;
+
   var endpoint =
     "https://generativelanguage.googleapis.com/v1beta/models/" +
     EMBEDDING_MODEL +
@@ -1658,7 +1865,8 @@ async function embedTextWithGemini(geminiApiKey, text) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "models/" + EMBEDDING_MODEL,
-        content: { parts: [{ text: text }] },
+        content: { parts: parts },
+        outputDimensionality: EMBEDDING_DIMENSIONS,
       }),
       signal: controller.signal,
     });
@@ -1675,6 +1883,15 @@ async function embedTextWithGemini(geminiApiKey, text) {
   }
 }
 
+// ‼️ اصلاح‌شده — این تابع (که برای embedding سوال خریدار، همیشه فقط
+// متن، استفاده می‌شود) حالا یک پوسته‌ی نازک روی embedProductWithGemini
+// است تا هر دو مسیر (embedding محصول، embedding سوال) از یک منطق واحد
+// عبور کنند.
+async function embedTextWithGemini(geminiApiKey, text) {
+  if (!text) return null;
+  return embedProductWithGemini(geminiApiKey, text, null);
+}
+
 async function getStoredGeminiKey(env) {
   try {
     var raw = await env.CATALOG_KV.get(OCR_CONFIG_KEY);
@@ -1686,12 +1903,6 @@ async function getStoredGeminiKey(env) {
   }
 }
 
-// ‼️ اصلاحیه — کلید Gemini مخصوص Vectorize را از پیکربندی جداگانه‌ی
-// خودِ Vectorize (VECTORIZE_CONFIG_KEY) می‌خواند، نه از پیکربندی OCR
-// (OCR_CONFIG_KEY). قبلاً این دو اشتباهاً یکی فرض شده بودند؛ حالا کاملاً
-// مستقل‌اند: فروشنده می‌تواند فقط کارت ۲ (OCR) را وصل کند، فقط کارت ۳
-// (Vectorize) را وصل کند، هر دو را، یا هیچ‌کدام را — هرکدام کاملاً
-// مستقل کار می‌کند.
 async function getVectorizeGeminiKey(env) {
   try {
     var raw = await env.CATALOG_KV.get(VECTORIZE_CONFIG_KEY);
@@ -1703,7 +1914,10 @@ async function getVectorizeGeminiKey(env) {
   }
 }
 
-async function buildVectorizeIndexIncrementally(env) {
+// ‼️ اصلاح‌شده — امضای تابع حالا ctx هم می‌گیرد (برای پاس‌دادن به
+// fetchImagePartForEmbedding، که خودش برای persistImageSideEffects از
+// ctx.waitUntil استفاده می‌کند).
+async function buildVectorizeIndexIncrementally(env, ctx) {
   if (!env.VECTOR_INDEX) return;
 
   try {
@@ -1714,7 +1928,7 @@ async function buildVectorizeIndexIncrementally(env) {
     var lastId = (stateRow && stateRow.last_embedded_product_id) || 0;
 
     var rows = await env.CATALOG_DB
-      .prepare("SELECT id, url, title, ocr_text FROM products WHERE id > ? ORDER BY id ASC LIMIT ?")
+      .prepare("SELECT id, url, title, ocr_text, image FROM products WHERE id > ? ORDER BY id ASC LIMIT ?")
       .bind(lastId, VECTOR_EMBED_BATCH_SIZE)
       .all();
 
@@ -1735,9 +1949,18 @@ async function buildVectorizeIndexIncrementally(env) {
       maxId = Math.max(maxId, p.id);
 
       var text = ((p.title || "") + (p.ocr_text ? " " + p.ocr_text : "")).trim().slice(0, VECTOR_EMBED_TEXT_MAX_CHARS);
-      if (!text) continue;
 
-      var values = await embedTextWithGemini(geminiApiKey, text);
+      // ‼️ جدید — عکس اول محصول (اگر داشت) را می‌گیرد؛ اگر عکسی نبود یا
+      // دانلودش شکست خورد، imagePart برابر null می‌ماند و فقط متن
+      // embed می‌شود — هیچ محصولی گیر نمی‌کند.
+      var imagePart = null;
+      if (p.image) {
+        imagePart = await fetchImagePartForEmbedding(p.image, env, ctx);
+      }
+
+      if (!text && !imagePart) continue;
+
+      var values = await embedProductWithGemini(geminiApiKey, text, imagePart);
       if (values) {
         vectors.push({ id: "p" + p.id, values: values, metadata: { pid: p.id } });
       }
@@ -1818,12 +2041,6 @@ async function searchWithVectorize(env, queryText, limit) {
 }
 
 async function handleSearchRequest(request, env, ctx) {
-  // ‼️ اصلاحیه — قبلاً هدر Cache-Control ست می‌شد ولی هرگز cache.put
-  // صدا زده نمی‌شد، یعنی هیچ جست‌وجویی واقعاً کش نمی‌شد. حالا دقیقاً
-  // همان الگویی که handleCatalogRequest و handleImageProxy از قبل
-  // دارند اینجا هم اعمال شده: اول کش لبه‌ای چک می‌شود؛ اگر جست‌وجوی
-  // عیناً همین (همان q) به‌تازگی انجام شده، بدون هیچ تماسی با D1 یا
-  // Gemini، مستقیم از کش برگردانده می‌شود.
   var cache = caches.default;
   var cachedResponse = await cache.match(request);
   if (cachedResponse) {
@@ -1868,7 +2085,7 @@ async function handleSearchRequest(request, env, ctx) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// روتینگ اصلی — بدون تغییر
+// روتینگ اصلی
 // ══════════════════════════════════════════════════════════════════════
 
 export default {
@@ -1955,12 +2172,15 @@ export default {
     if (url.pathname === "/vectorize-status" && request.method === "GET") {
       return handleVectorizeStatus(env);
     }
+    if (url.pathname === "/migrate-vectorize-for-images" && request.method === "POST") {
+      return handleMigrateVectorizeForImages(request, env);
+    }
 
     return json({ error: "مسیر یافت نشد" }, 404);
   },
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runSelfRefreshCycle(env));
-    ctx.waitUntil(buildVectorizeIndexIncrementally(env));
+    ctx.waitUntil(buildVectorizeIndexIncrementally(env, ctx));
   },
 };
